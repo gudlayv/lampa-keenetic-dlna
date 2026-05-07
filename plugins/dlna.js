@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.1.1';
+    var PLUGIN_VERSION = '0.1.2';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -198,7 +198,23 @@
         };
     }
 
+    function injectStyles() {
+        if (document.getElementById('keenetic-dlna-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'keenetic-dlna-styles';
+        style.textContent =
+            '.dlna-keenetic .selector{transition:transform 0.12s ease,background-color 0.12s ease;position:relative;}' +
+            '.dlna-keenetic .selector.focus,' +
+            '.dlna-keenetic .selector.hover{background:#fff!important;color:#000!important;transform:scale(1.015);}' +
+            '.dlna-keenetic .selector.focus *,' +
+            '.dlna-keenetic .selector.hover *{color:#000!important;}' +
+            '.dlna-keenetic .selector.focus::after{content:"";position:absolute;inset:-0.4em;border:0.25em solid #ffd966;border-radius:0.7em;pointer-events:none;}';
+        document.head.appendChild(style);
+    }
+
     function startPlugin() {
+        injectStyles();
+
         var manifest = {
             type: 'video',
             version: PLUGIN_VERSION,
