@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.2.1';
+    var PLUGIN_VERSION = '0.3.0';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -148,6 +148,47 @@
         return Lampa.TMDB.image('t/p/' + (size || 'w200') + posterPath);
     }
 
+    // Стабильный хеш для DLNA-файла (по URL)
+    function fileHash(url) {
+        if (window.Lampa && Lampa.Utils && typeof Lampa.Utils.hash === 'function') {
+            return 'dlna_' + Lampa.Utils.hash(url);
+        }
+        // Fallback djb2
+        var h = 5381;
+        for (var i = 0; i < url.length; i++) h = ((h << 5) + h + url.charCodeAt(i)) | 0;
+        return 'dlna_' + (h >>> 0).toString(36);
+    }
+
+    // Длительность строки "2:26:15.680" → секунды
+    function parseDurationToSeconds(s) {
+        if (!s) return 0;
+        var m = String(s).match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
+        if (!m) return 0;
+        return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseFloat(m[3]);
+    }
+
+    // Сборка card-объекта для Favorite/Player
+    function buildCard(entry, hash) {
+        var fallbackId = hash;
+        if (entry.tmdb && entry.tmdb.id) {
+            return Object.assign({}, entry.tmdb, {
+                source: 'tmdb',
+                method: 'movie'
+            });
+        }
+        return {
+            id: fallbackId,
+            source: 'dlna',
+            method: 'movie',
+            title: entry.title,
+            original_title: entry.title,
+            release_date: '',
+            vote_average: 0,
+            poster_path: '',
+            overview: ''
+        };
+    }
+
     function Component() {
         var stack = [{ id: '0', title: 'Keenetic Ultra' }];
         var html, scroll, self = this;
@@ -191,9 +232,17 @@
                         line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
                     } else {
                         // Видео — раскладка с местом под постер
-                        line = $('<div class="selector dlna-row dlna-row--video" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
-                        var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center;"></div>');
+                        var hash = fileHash(entry.url || (top.id + '/' + entry.id));
+                        entry._hash = hash;
+                        var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
+
+                        line = $('<div class="selector dlna-row dlna-row--video" data-hash="' + hash + '" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
+                        var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;"></div>');
                         poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
+                        // Watched badge: маленький круг сверху если % > 80
+                        if (savedTl && savedTl.percent >= 80) {
+                            poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+                        }
                         line.append(poster);
 
                         var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
@@ -206,6 +255,13 @@
                             info.append('<div class="dlna-row__local" style="font-size:0.78em; opacity:0.6; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
                         }
                         info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
+
+                        // Прогресс-бар если есть прогресс
+                        if (savedTl && savedTl.percent > 0) {
+                            var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
+                            info.append(bar);
+                        }
+
                         line.append(info);
 
                         // Async TMDB enrichment
@@ -254,8 +310,28 @@
                             self.openCurrent();
                         } else if (entry.url) {
                             var title = (entry.tmdb && entry.tmdb.title) || entry.title;
-                            Lampa.Player.play({ title: title, url: entry.url });
-                            Lampa.Player.playlist([{ title: title, url: entry.url }]);
+                            var hash = entry._hash || fileHash(entry.url);
+                            var card = buildCard(entry, hash);
+                            // Подсказываем длительность Timeline-у заранее (до начала проигрывания),
+                            // чтобы прогресс-бар имел корректный знаменатель
+                            var durSec = parseDurationToSeconds(entry.duration);
+                            var timeline = (Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
+                            if (timeline && durSec && !timeline.duration) {
+                                timeline.duration = durSec;
+                                if (timeline.handler) timeline.handler(timeline.percent || 0, timeline.time || 0, durSec);
+                            }
+                            // В историю
+                            try {
+                                if (Lampa.Favorite && Lampa.Favorite.add) Lampa.Favorite.add('history', card, 100);
+                            } catch (e) {}
+
+                            Lampa.Player.play({
+                                title: title,
+                                url: entry.url,
+                                card: card,
+                                timeline: timeline
+                            });
+                            Lampa.Player.playlist([{ title: title, url: entry.url, card: card, timeline: timeline }]);
                         } else {
                             Lampa.Noty.show('Нет URL для воспроизведения');
                         }

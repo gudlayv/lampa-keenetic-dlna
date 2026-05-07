@@ -47,14 +47,10 @@ function parseArgs(argv) {
         userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
     // Пропускаем мастер выбора языка — LAMPA проверяет localStorage.language до запуска
-    // Также включаем прокси для TMDB через наш cf-tunnel — у пользователя/Tizen TMDB напрямую не идет
     await ctx.addInitScript(() => {
         try {
             window.localStorage.setItem('language', 'ru');
             window.localStorage.setItem('tmdb_lang', 'ru');
-            window.localStorage.setItem('proxy_tmdb', 'true');
-            window.localStorage.setItem('tmdb_proxy_api', 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/');
-            window.localStorage.setItem('tmdb_proxy_image', 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/');
         } catch (e) {}
     });
     const page = await ctx.newPage();
