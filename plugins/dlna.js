@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.1';
+    var PLUGIN_VERSION = '0.5.2';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -696,6 +696,15 @@
             if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
 
             // Контроллер tabs: левый/правый — между табами, down — в контент, up — в LAMPA-head.
+            // dlna_tabs: left/right переключают вкладку напрямую, без Navigator
+            // (Lampa Navigator плохо ходит между tabs во flex-row на Tizen).
+            function moveTab(delta) {
+                var idx = TABS.findIndex(function (t) { return t.id === currentTab; });
+                if (idx < 0) idx = 0;
+                var next = (idx + delta + TABS.length) % TABS.length;
+                if (TABS[next].id === currentTab) return;
+                switchTab(TABS[next].id);
+            }
             Lampa.Controller.add('dlna_tabs', {
                 invisible: true,
                 toggle: function () {
@@ -704,8 +713,8 @@
                     if (activeTab) Lampa.Controller.collectionFocus(activeTab, tabsRow);
                     else Lampa.Controller.collectionFocus(false, tabsRow);
                 },
-                left:  function () { if (Navigator.canmove('left'))  Navigator.move('left');  else Lampa.Controller.toggle('menu'); },
-                right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
+                left:  function () { moveTab(-1); },
+                right: function () { moveTab(1); },
                 up:    function () { Lampa.Controller.toggle('head'); },
                 down:  function () { Lampa.Controller.toggle('content'); },
                 back:  function () { Lampa.Activity.backward(); }
@@ -753,8 +762,12 @@
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
             // Tabs: горизонтальный ряд
             '.dlna-keenetic__tabs{display:flex;gap:0.4em;flex-wrap:wrap;}' +
-            '.dlna-keenetic__tab{padding:0.5em 1.1em;border-radius:0.4em;font-weight:600;cursor:pointer;background:transparent;}' +
-            '.dlna-keenetic__tab--active{background:rgba(255,255,255,0.18);}' +
+            '.dlna-keenetic__tab{padding:0.5em 1.1em;border-radius:0.4em;font-weight:600;cursor:pointer;background:transparent;opacity:0.6;}' +
+            // Active — текст ярче, без фона
+            '.dlna-keenetic__tab--active{opacity:1;color:#ffd966;}' +
+            // Focus — заметная белая обводка через box-shadow inset (без layout shift, без blur)
+            '.dlna-keenetic__tab.focus,' +
+            '.dlna-keenetic__tab.hover{background:rgba(255,255,255,0.18)!important;opacity:1;}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
