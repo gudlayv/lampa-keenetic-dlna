@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '0.5.1';
+    var PLUGIN_VERSION = '0.6.0';
     var REPORT_ENDPOINT_KEY = 'tizen_debug_report_url';
     var REPORT_ENDPOINT_DEFAULT = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/report';
 
@@ -232,11 +232,23 @@
 
                 var view = $('<div style="padding:1em 1.5em; font-size:0.9em; line-height:1.35;"></div>');
 
+                view.append('<div style="font-size:1.6em; font-weight:bold; color:#3a73ff; margin-bottom:0.4em;">Tizen Debug v' + PLUGIN_VERSION + '</div>');
+
                 var hdr = $('<div style="margin-bottom:0.8em; padding:0.6em 0.8em; background:rgba(58,115,255,0.18); border-left:4px solid #3a73ff; border-radius:0.3em;"></div>');
                 hdr.append('<div style="font-size:1.4em; font-weight:bold;">' + escapeHtml(model) + ' · Tizen ' + escapeHtml(tzVer) + '</div>');
                 hdr.append('<div style="font-size:0.85em; opacity:0.8;">build: ' + escapeHtml(fwBuild) + '</div>');
                 hdr.append('<div style="font-size:0.85em; opacity:0.8;">network.upnp=' + escapeHtml(String(hasUpnp)) + ' · network.dlna=' + escapeHtml(String(hasDlna)) + '</div>');
                 view.append(hdr);
+
+                // hello-ping чтобы лог сервера показал, что новая версия плагина реально запустилась
+                try {
+                    var helloUrl = (function () {
+                        var url = reportEndpoint();
+                        return url.replace(/\/report$/, '') + '/ping?from=create&v=' + encodeURIComponent(PLUGIN_VERSION);
+                    })();
+                    var helloImg = new Image();
+                    helloImg.src = helloUrl + '&_=' + Date.now();
+                } catch (e) {}
 
                 var btnRefresh = $('<div class="selector" style="display:inline-block; padding:0.5em 1em; background:#444; border-radius:0.3em; margin-bottom:0.6em;">Пересобрать</div>');
                 btnRefresh.on('hover:enter', function () {
