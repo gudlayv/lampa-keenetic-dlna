@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.3.0';
+    var PLUGIN_VERSION = '0.4.0';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -110,9 +110,7 @@
     }
 
     // Парсим имя файла: пробуем выделить чистое название и год
-    // "Wake.Up.Dead.Man.A.Knives.Out.Mystery.2025.2160p_RHS" → {title: "Wake Up Dead Man A Knives Out Mystery", year: 2025}
     function parseFilename(name) {
-        // убираем расширение если есть
         name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
         var yearMatch = name.match(/[._\s\-(](19|20)\d{2}[._\s\-)]/);
         if (yearMatch) {
@@ -124,15 +122,32 @@
         return { title: name.replace(/[._]+/g, ' ').trim(), year: null };
     }
 
-    // TMDB search через API ключ LAMPA
+    // Парсим эпизод: SxxExx или 1x03. Возвращает {show, season, episode} или null.
+    function parseEpisode(name) {
+        name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        var m = name.match(/^(.+?)[._\s\-]+S(\d{1,2})[._\s\-]?E(\d{1,3})/i);
+        if (m) {
+            return { show: m[1].replace(/[._]+/g, ' ').trim(), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+        }
+        m = name.match(/^(.+?)[._\s\-]+(\d{1,2})x(\d{1,3})\b/i);
+        if (m) {
+            return { show: m[1].replace(/[._]+/g, ' ').trim(), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+        }
+        return null;
+    }
+
+    // TMDB search через API ключ LAMPA. type: 'movie' | 'tv'
     var tmdbCache = {};
-    function tmdbSearch(title, year, cb) {
-        var key = title + '|' + (year || '');
+    function tmdbSearch(title, year, type, cb) {
+        if (typeof type === 'function') { cb = type; type = 'movie'; }
+        type = type || 'movie';
+        var key = type + '|' + title + '|' + (year || '');
         if (tmdbCache[key]) { cb(tmdbCache[key]); return; }
         if (!window.Lampa || !Lampa.TMDB) { cb(null); return; }
-        var url = Lampa.TMDB.api('search/movie?api_key=' + Lampa.TMDB.key() +
+        var qParam = type === 'tv' ? '&first_air_date_year=' : '&year=';
+        var url = Lampa.TMDB.api('search/' + type + '?api_key=' + Lampa.TMDB.key() +
             '&language=ru&query=' + encodeURIComponent(title) +
-            (year ? '&year=' + year : '') +
+            (year ? qParam + year : '') +
             '&include_adult=false');
         var network = new Lampa.Reguest();
         network.timeout(10000);
@@ -148,7 +163,7 @@
         return Lampa.TMDB.image('t/p/' + (size || 'w200') + posterPath);
     }
 
-    // Стабильный хеш для DLNA-файла (по URL)
+    // Стабильный хеш для DLNA-файла (по URL) — fallback когда нет TMDB hit
     function fileHash(url) {
         if (window.Lampa && Lampa.Utils && typeof Lampa.Utils.hash === 'function') {
             return 'dlna_' + Lampa.Utils.hash(url);
@@ -157,6 +172,19 @@
         var h = 5381;
         for (var i = 0; i < url.length; i++) h = ((h << 5) + h + url.charCodeAt(i)) | 0;
         return 'dlna_' + (h >>> 0).toString(36);
+    }
+
+    // Hash в формате LAMPA: используется на main TMDB-карточке для отображения прогресса.
+    // Фильм:    Utils.hash(original_title)
+    // Эпизод:   Utils.hash(season + (season>10?':':'') + episode + original_name)
+    function lampaHash(card, season, episode) {
+        if (!card || !window.Lampa || !Lampa.Utils) return null;
+        var orig = card.original_name || card.original_title;
+        if (!orig) return null;
+        if (season != null && episode != null) {
+            return Lampa.Utils.hash([season, season > 10 ? ':' : '', episode, orig].join(''));
+        }
+        return Lampa.Utils.hash(orig);
     }
 
     // Длительность строки "2:26:15.680" → секунды
@@ -189,170 +217,313 @@
         };
     }
 
+    // Группируем серии в виртуальные папки. На вход — DLNA-entries.
+    // Возвращает entries с виртуальными папками вместо отдельных серий.
+    function groupEpisodes(rawEntries) {
+        var groups = {};
+        var rest = [];
+        rawEntries.forEach(function (e) {
+            if (e.isFolder) { rest.push(e); return; }
+            var ep = parseEpisode(e.title);
+            if (!ep) { rest.push(e); return; }
+            var key = ep.show.toLowerCase() + '|' + ep.season;
+            if (!groups[key]) groups[key] = { show: ep.show, season: ep.season, episodes: [] };
+            e._episode = ep;
+            groups[key].episodes.push(e);
+        });
+        var groupKeys = Object.keys(groups);
+        if (!groupKeys.length) return rest;
+
+        var virtual = groupKeys.map(function (k) {
+            var g = groups[k];
+            g.episodes.sort(function (a, b) { return a._episode.episode - b._episode.episode; });
+            return {
+                isFolder: true,
+                isVirtualSeries: true,
+                title: g.show + ' · Сезон ' + g.season + ' · ' + g.episodes.length + ' сер.',
+                show: g.show,
+                season: g.season,
+                episodes: g.episodes,
+                upnpClass: 'object.container.storageFolder.virtual'
+            };
+        });
+        return virtual.concat(rest);
+    }
+
     function Component() {
+        // Стек: каждый элемент {id, title} — DLNA folder. Виртуальные группы серий
+        // имеют kind:'episodes' и payload (массив entries уже отрисованных).
         var stack = [{ id: '0', title: 'Keenetic Ultra' }];
-        var html, scroll, self = this;
+        var html, head, body, scroll, self = this;
 
         this.create = function () {
             html = $('<div class="dlna-keenetic"></div>');
+            head = $('<div class="dlna-keenetic__head"></div>');
+            body = $('<div class="dlna-keenetic__body"></div>');
             scroll = new Lampa.Scroll({ mask: true, over: true });
-            html.append(scroll.render());
+            scroll.minus(head);
+            body.append(scroll.render(true));
+            html.append(head).append(body);
             this.activity.loader(true);
             this.openCurrent();
         };
 
+        function setHead(top) {
+            head.empty();
+            var pathRow = $('<div class="dlna-keenetic__head-path"></div>');
+            pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
+            head.append(pathRow);
+        }
+
         this.openCurrent = function () {
             var top = stack[stack.length - 1];
+            setHead(top);
             scroll.clear();
-
-            var pathRow = $('<div style="padding:0.8em 1.2em; font-size:0.9em; opacity:0.7; word-break:break-all;"></div>');
-            pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
-            scroll.append(pathRow);
             scroll.append($('<div style="padding:1em 1.2em;">Загрузка ' + escapeHtml(top.title) + '…</div>'));
 
+            // Виртуальная группа эпизодов — рендерим из памяти, не ходим в DLNA
+            if (top.kind === 'episodes') {
+                renderEntries(top.payload || []);
+                return;
+            }
+
             browse(top.id, function (entries) {
-                scroll.clear();
-                scroll.append(pathRow);
-
-                if (stack.length > 1) {
-                    var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
-                    backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
-                    backBtn.on('hover:focus', function () { scroll.update(backBtn); });
-                    scroll.append(backBtn);
-                }
-
-                if (!entries.length) {
-                    scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
-                }
-
-                entries.forEach(function (entry) {
-                    var line;
-                    if (entry.isFolder) {
-                        line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
-                        line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
-                    } else {
-                        // Видео — раскладка с местом под постер
-                        var hash = fileHash(entry.url || (top.id + '/' + entry.id));
-                        entry._hash = hash;
-                        var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
-
-                        line = $('<div class="selector dlna-row dlna-row--video" data-hash="' + hash + '" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
-                        var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;"></div>');
-                        poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
-                        // Watched badge: маленький круг сверху если % > 80
-                        if (savedTl && savedTl.percent >= 80) {
-                            poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
-                        }
-                        line.append(poster);
-
-                        var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
-                        info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em; word-break:break-word;">' + escapeHtml(entry.title) + '</div>');
-                        var localMeta = [];
-                        if (entry.resolution) localMeta.push(entry.resolution);
-                        if (entry.duration) localMeta.push(entry.duration);
-                        if (entry.size) localMeta.push(formatSize(entry.size));
-                        if (localMeta.length) {
-                            info.append('<div class="dlna-row__local" style="font-size:0.78em; opacity:0.6; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
-                        }
-                        info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
-
-                        // Прогресс-бар если есть прогресс
-                        if (savedTl && savedTl.percent > 0) {
-                            var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
-                            info.append(bar);
-                        }
-
-                        line.append(info);
-
-                        // Async TMDB enrichment
-                        var parsed = parseFilename(entry.title);
-                        tmdbSearch(parsed.title, parsed.year, function (hit) {
-                            var box = info.find('.dlna-row__tmdb');
-                            if (!hit) {
-                                box.text(parsed.year ? ('TMDB: не найдено · ' + parsed.title + ' (' + parsed.year + ')') : 'TMDB: не найдено').css('color', '#888');
-                                return;
-                            }
-                            // Заменяем заголовок на TMDB-название
-                            var tmdbTitle = hit.title || hit.original_title || parsed.title;
-                            var year = (hit.release_date || '').slice(0, 4);
-                            info.find('.dlna-row__title').text(tmdbTitle + (year ? ' (' + year + ')' : ''));
-                            // Метаданные
-                            var rating = hit.vote_average ? '★ ' + hit.vote_average.toFixed(1) : '';
-                            var orig = (hit.original_title && hit.original_title !== tmdbTitle) ? hit.original_title : '';
-                            var bits = [];
-                            if (rating) bits.push('<span style="color:#ffd966;">' + rating + '</span>');
-                            if (orig) bits.push('<span style="opacity:0.7;">' + escapeHtml(orig) + '</span>');
-                            box.html(bits.join(' · ') || '');
-                            // Постер
-                            if (hit.poster_path) {
-                                var url = tmdbPosterUrl(hit.poster_path, 'w200');
-                                poster.css({
-                                    'background-image': 'url("' + url + '")',
-                                    'background-size': 'cover',
-                                    'background-position': 'center'
-                                });
-                                poster.empty();
-                            }
-                            // Описание добавим под мета
-                            if (hit.overview) {
-                                if (info.find('.dlna-row__overview').length === 0) {
-                                    info.append('<div class="dlna-row__overview" style="font-size:0.78em; opacity:0.7; margin-top:0.3em; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;"></div>');
-                                }
-                                info.find('.dlna-row__overview').text(hit.overview);
-                            }
-                            // Сохраним для последующих этапов (history/full-card)
-                            entry.tmdb = hit;
-                        });
-                    }
-                    line.on('hover:enter', function () {
-                        if (entry.isFolder) {
-                            stack.push({ id: entry.id, title: entry.title });
-                            self.openCurrent();
-                        } else if (entry.url) {
-                            var title = (entry.tmdb && entry.tmdb.title) || entry.title;
-                            var hash = entry._hash || fileHash(entry.url);
-                            var card = buildCard(entry, hash);
-                            // Подсказываем длительность Timeline-у заранее (до начала проигрывания),
-                            // чтобы прогресс-бар имел корректный знаменатель
-                            var durSec = parseDurationToSeconds(entry.duration);
-                            var timeline = (Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
-                            if (timeline && durSec && !timeline.duration) {
-                                timeline.duration = durSec;
-                                if (timeline.handler) timeline.handler(timeline.percent || 0, timeline.time || 0, durSec);
-                            }
-                            // В историю
-                            try {
-                                if (Lampa.Favorite && Lampa.Favorite.add) Lampa.Favorite.add('history', card, 100);
-                            } catch (e) {}
-
-                            Lampa.Player.play({
-                                title: title,
-                                url: entry.url,
-                                card: card,
-                                timeline: timeline
-                            });
-                            Lampa.Player.playlist([{ title: title, url: entry.url, card: card, timeline: timeline }]);
-                        } else {
-                            Lampa.Noty.show('Нет URL для воспроизведения');
-                        }
-                    });
-                    line.on('hover:focus', function () { scroll.update(line); });
-                    scroll.append(line);
-                });
-
-                self.activity.loader(false);
-                self.activity.toggle();
-                // Пересобрать collection после добавления selectors и сразу выставить фокус
-                Lampa.Controller.toggle('content');
+                renderEntries(entries);
             }, function (err) {
                 scroll.clear();
-                scroll.append(pathRow);
                 var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em; font-size:0.9em; word-break:break-all;"></div>');
                 box.append('<b>Ошибка Browse:</b><br>' + escapeHtml(JSON.stringify(err)));
                 scroll.append(box);
                 self.activity.loader(false);
             });
         };
+
+        function renderEntries(rawEntries) {
+            scroll.clear();
+
+            if (stack.length > 1) {
+                var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
+                backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
+                backBtn.on('hover:focus', function () { scroll.update(backBtn); });
+                scroll.append(backBtn);
+            }
+
+            var entries = groupEpisodes(rawEntries);
+
+            if (!entries.length) {
+                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+            }
+
+            entries.forEach(function (entry) {
+                var line = renderEntryRow(entry);
+                line.on('hover:focus', function () { scroll.update(line); });
+                scroll.append(line);
+            });
+
+            self.activity.loader(false);
+            self.activity.toggle();
+            Lampa.Controller.toggle('content');
+        }
+
+        function renderEntryRow(entry) {
+            if (entry.isFolder) {
+                if (entry.isVirtualSeries) {
+                    return renderSeriesRow(entry);
+                }
+                var line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
+                line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
+                line.on('hover:enter', function () {
+                    stack.push({ id: entry.id, title: entry.title });
+                    self.openCurrent();
+                });
+                return line;
+            }
+            return renderVideoRow(entry, /*episode*/ entry._episode || null, /*card*/ null);
+        }
+
+        function renderSeriesRow(entry) {
+            // Виртуальная папка сериала+сезона
+            var line = $('<div class="selector dlna-row dlna-row--series" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
+            var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center;"></div>');
+            poster.html('<div style="opacity:0.4;">' + ICON_FOLDER + '</div>');
+            line.append(poster);
+
+            var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
+            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em;">' + escapeHtml(entry.show) + '</div>');
+            info.append('<div class="dlna-row__local" style="font-size:0.85em; opacity:0.7; margin-top:0.2em;">Сезон ' + entry.season + ' · ' + entry.episodes.length + ' серий</div>');
+            info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
+            line.append(info);
+
+            // TMDB-поиск как сериал
+            tmdbSearch(entry.show, null, 'tv', function (hit) {
+                var box = info.find('.dlna-row__tmdb');
+                if (!hit) {
+                    box.text('TMDB: не найдено').css('color', '#888');
+                    return;
+                }
+                var name = hit.name || hit.original_name || entry.show;
+                var year = (hit.first_air_date || '').slice(0, 4);
+                info.find('.dlna-row__title').text(name + (year ? ' (' + year + ')' : ''));
+                var bits = [];
+                if (hit.vote_average) bits.push('<span style="color:#ffd966;">★ ' + hit.vote_average.toFixed(1) + '</span>');
+                if (hit.original_name && hit.original_name !== name) bits.push('<span style="opacity:0.7;">' + escapeHtml(hit.original_name) + '</span>');
+                box.html(bits.join(' · ') || '');
+                if (hit.poster_path) {
+                    poster.css({
+                        'background-image': 'url("' + tmdbPosterUrl(hit.poster_path, 'w200') + '")',
+                        'background-size': 'cover',
+                        'background-position': 'center'
+                    });
+                    poster.empty();
+                }
+                entry.tmdb = hit;
+            });
+
+            line.on('hover:enter', function () {
+                stack.push({
+                    kind: 'episodes',
+                    title: (entry.tmdb ? (entry.tmdb.name || entry.tmdb.original_name) : entry.show) + ' · Сезон ' + entry.season,
+                    payload: entry.episodes.map(function (e) {
+                        e._series = entry; // ссылка на серию для hash + card
+                        return e;
+                    })
+                });
+                self.openCurrent();
+            });
+            return line;
+        }
+
+        function renderVideoRow(entry, episode, _card) {
+            // hash: для TMDB-фильма Utils.hash(original_title), для серии — с season+episode,
+            // иначе — fallback по url. После TMDB-резолва пересчитаем.
+            var hash = fileHash(entry.url || entry.id || (Date.now() + '_' + Math.random()));
+            entry._hash = hash;
+
+            var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
+
+            var line = $('<div class="selector dlna-row dlna-row--video" data-hash="' + hash + '" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
+            var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;"></div>');
+            poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
+            if (savedTl && savedTl.percent >= 80) {
+                poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+            }
+            line.append(poster);
+
+            var displayTitle = entry.title;
+            if (episode) {
+                displayTitle = 'Серия ' + episode.episode + ' · ' + entry.title;
+            }
+
+            var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
+            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em; word-break:break-word;">' + escapeHtml(displayTitle) + '</div>');
+            var localMeta = [];
+            if (entry.resolution) localMeta.push(entry.resolution);
+            if (entry.duration) localMeta.push(entry.duration);
+            if (entry.size) localMeta.push(formatSize(entry.size));
+            if (localMeta.length) {
+                info.append('<div class="dlna-row__local" style="font-size:0.78em; opacity:0.6; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
+            }
+            // TMDB-блок только для одиночных фильмов; для серий — мета сериала уже на родительской карточке
+            if (!episode) {
+                info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
+            }
+            if (savedTl && savedTl.percent > 0) {
+                var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
+                info.append(bar);
+            }
+            line.append(info);
+
+            // TMDB-обогащение для одиночного фильма
+            if (!episode) {
+                var parsed = parseFilename(entry.title);
+                tmdbSearch(parsed.title, parsed.year, 'movie', function (hit) {
+                    var box = info.find('.dlna-row__tmdb');
+                    if (!hit) {
+                        box.text(parsed.year ? ('TMDB: не найдено · ' + parsed.title + ' (' + parsed.year + ')') : 'TMDB: не найдено').css('color', '#888');
+                        return;
+                    }
+                    var tmdbTitle = hit.title || hit.original_title || parsed.title;
+                    var year = (hit.release_date || '').slice(0, 4);
+                    info.find('.dlna-row__title').text(tmdbTitle + (year ? ' (' + year + ')' : ''));
+                    var bits = [];
+                    if (hit.vote_average) bits.push('<span style="color:#ffd966;">★ ' + hit.vote_average.toFixed(1) + '</span>');
+                    if (hit.original_title && hit.original_title !== tmdbTitle) bits.push('<span style="opacity:0.7;">' + escapeHtml(hit.original_title) + '</span>');
+                    box.html(bits.join(' · ') || '');
+                    if (hit.poster_path) {
+                        poster.css({
+                            'background-image': 'url("' + tmdbPosterUrl(hit.poster_path, 'w200') + '")',
+                            'background-size': 'cover', 'background-position': 'center'
+                        });
+                        poster.empty();
+                    }
+                    if (hit.overview) {
+                        if (info.find('.dlna-row__overview').length === 0) {
+                            info.append('<div class="dlna-row__overview" style="font-size:0.78em; opacity:0.7; margin-top:0.3em; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;"></div>');
+                        }
+                        info.find('.dlna-row__overview').text(hit.overview);
+                    }
+                    entry.tmdb = hit;
+                    // Перезаписываем hash на LAMPA-формат — чтобы прогресс был виден на main TMDB-карточке
+                    var newHash = lampaHash(hit);
+                    if (newHash) updateRowHash(line, info, entry, newHash);
+                });
+            }
+
+            line.on('hover:enter', function () { playEntry(entry, episode); });
+            return line;
+        }
+
+        function updateRowHash(line, info, entry, newHash) {
+            entry._hash = newHash;
+            line.attr('data-hash', newHash);
+            // Обновим прогресс-бар если есть
+            var tl = Lampa.Timeline.view(newHash);
+            info.find('.dlna-row__progress').remove();
+            if (tl && tl.percent > 0) {
+                var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, tl.percent) + '%;"></div></div>');
+                info.append(bar);
+            }
+        }
+
+        function playEntry(entry, episode) {
+            if (!entry.url) { Lampa.Noty.show('Нет URL для воспроизведения'); return; }
+
+            var seriesTmdb = entry._series && entry._series.tmdb;
+            var card;
+            var hash;
+            var title;
+
+            if (episode && seriesTmdb) {
+                // Сериал с TMDB
+                card = Object.assign({}, seriesTmdb, { source: 'tmdb', method: 'tv' });
+                hash = lampaHash(card, episode.season, episode.episode) || fileHash(entry.url);
+                title = (card.name || card.original_name) + ' · S' + episode.season + 'E' + episode.episode;
+            } else if (entry.tmdb) {
+                // Одиночный фильм с TMDB
+                card = Object.assign({}, entry.tmdb, { source: 'tmdb', method: 'movie' });
+                hash = lampaHash(card) || fileHash(entry.url);
+                title = card.title || card.original_title;
+            } else {
+                // Без TMDB — fallback
+                hash = entry._hash || fileHash(entry.url);
+                card = buildCard(entry, hash);
+                title = entry.title;
+            }
+
+            var durSec = parseDurationToSeconds(entry.duration);
+            var timeline = (Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
+            if (timeline && durSec && !timeline.duration) {
+                timeline.duration = durSec;
+                if (timeline.handler) timeline.handler(timeline.percent || 0, timeline.time || 0, durSec);
+            }
+
+            try {
+                if (Lampa.Favorite && Lampa.Favorite.add) Lampa.Favorite.add('history', card, 100);
+            } catch (e) {}
+
+            Lampa.Player.play({ title: title, url: entry.url, card: card, timeline: timeline });
+            Lampa.Player.playlist([{ title: title, url: entry.url, card: card, timeline: timeline }]);
+        }
 
         this.render = function () { return html; };
 
@@ -389,13 +560,16 @@
         var style = document.createElement('style');
         style.id = 'keenetic-dlna-styles';
         style.textContent =
-            '.dlna-keenetic .selector{transition:transform 0.12s ease,background-color 0.12s ease;position:relative;}' +
+            // Layout: head не входит в scroll, чтобы скролл правильно считал свою высоту
+            '.dlna-keenetic{display:flex;flex-direction:column;height:100%;}' +
+            '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
+            '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
+            '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
+            // Selector: тень вместо рамки/scale, чтобы UI не дёргался
+            '.dlna-keenetic .selector{transition:box-shadow 0.15s ease;position:relative;}' +
             '.dlna-keenetic .selector.focus,' +
-            '.dlna-keenetic .selector.hover{background:#fff!important;color:#000!important;transform:scale(1.015);}' +
-            '.dlna-keenetic .selector.focus *,' +
-            '.dlna-keenetic .selector.hover *{color:#000!important;}' +
-            '.dlna-keenetic .selector.focus::after{content:"";position:absolute;inset:-0.4em;border:0.25em solid #ffd966;border-radius:0.7em;pointer-events:none;}' +
-            // Жестко ограничиваем SVG — иначе LAMPA-стили растягивают на 100%
+            '.dlna-keenetic .selector.hover{box-shadow:0 0 0 0.2em #ffd966,0 0 1.2em rgba(255,217,102,0.35);outline:none;}' +
+            // SVG — ограничиваем размер, иначе LAMPA-стили растягивают на 100%
             '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
             '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
         document.head.appendChild(style);
