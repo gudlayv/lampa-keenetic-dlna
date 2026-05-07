@@ -42,7 +42,7 @@ CORS-заголовками. Без прокси плагин **техничес
 **1a. Локальный HTTP** (по умолчанию, без внешних сервисов)
 
 ```sh
-ssh root@<keenetic-ip>
+ssh -o ServerAliveInterval=30 root@<keenetic-ip>
 opkg install ca-certificates
 curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scripts/entware-install.sh | sh
 ```
@@ -54,6 +54,18 @@ curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scr
 
 Этот URL стабильный, не меняется, ничего не уходит наружу. Не работает только
 через web-LAMPA (lampa.mx) и на платформах с агрессивным Private Network Access.
+
+> **Если в Кинетике только telnet** — telnet режет idle-сессии и `opkg install
+> python3` (~50 МБ) не успевает доскачаться. Запускай в фоне:
+> ```sh
+> curl -sSL -o /tmp/install.sh https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scripts/entware-install.sh
+> chmod +x /tmp/install.sh
+> nohup sh /tmp/install.sh > /tmp/install.log 2>&1 &
+> # переподключись через 5-10 минут, посмотри:
+> tail -50 /tmp/install.log
+> /opt/etc/init.d/S99lampa-dlna status
+> ```
+> Лучше один раз включить SSH в Кинетике (Управление → Параметры системы → Доступ к SSH).
 
 **1b. С Cloudflare-туннелем** (если 1a не работает на твоей платформе)
 
