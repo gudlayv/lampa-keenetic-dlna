@@ -1,41 +1,70 @@
 #!/usr/bin/env python3
 """
-Dev-сервер для отладки LAMPA-плагинов в локальной сети.
+HTTPS-CORS-прокси для DLNA-сервера Кинетика.
 
-Что делает:
-- GET /...           — отдает файлы из текущей директории (плагины и т.п.)
-- POST /report       — принимает JSON-отчет от плагина и сохраняет в reports/<ts>.json
-- GET  /reports      — JSON-список сохраненных отчетов
-- GET  /reports/last — последний отчет
+LAMPA-плагин шлёт SOAP-запросы через этот прокси:
+  POST /proxy/http://<dlna-host>/<path>
+Прокси форвардит запрос на DLNA, добавляет CORS-заголовки в ответ.
+
+Безопасность:
+- ALLOWED_HOSTS — whitelist хостов, на которые можно проксировать
+  (дефолт: только адрес DLNA-сервера). Запросы на админку Кинетика
+  и другие сервисы LAN отвергаются.
+- Никакой статики, никаких /reports — только /proxy + /ping.
 
 Запуск:
-    python3 serve.py [port]
-По умолчанию порт 8080. Слушает на всех интерфейсах (0.0.0.0).
+    python3 serve.py [port] [--allow host:port,host:port]
 
-URL для подключения в LAMPA (заменить IP на твой):
-    http://192.168.1.129:8080/plugins/tizen-debug.js
+Через переменные окружения:
+    DLNA_PROXY_PORT=8780
+    DLNA_PROXY_ALLOW="192.168.1.1:8200,192.168.1.1:80"
 """
 
-import json
 import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent
-REPORTS_DIR = ROOT / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 
-class Handler(SimpleHTTPRequestHandler):
+def _parse_allow(s):
+    """'host:port,host:port' → set of normalized 'host:port' strings."""
+    out = set()
+    for chunk in (s or "").split(","):
+        chunk = chunk.strip().lower()
+        if chunk:
+            out.add(chunk)
+    return out
+
+
+# Дефолт — только MiniDLNA на Кинетике. Остальные хосты блокируются.
+ALLOWED_HOSTS = _parse_allow(os.environ.get("DLNA_PROXY_ALLOW", "192.168.1.1:8200"))
+
+
+def host_allowed(target_url):
+    try:
+        u = urlparse(target_url)
+    except Exception:
+        return False
+    if u.scheme not in ("http", "https"):
+        return False
+    if not u.hostname:
+        return False
+    port = u.port or (443 if u.scheme == "https" else 80)
+    key = f"{u.hostname.lower()}:{port}"
+    return key in ALLOWED_HOSTS
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        sys.stdout.write("%s %s\n" % (self.address_string(), fmt % args))
+        sys.stdout.flush()
+
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, SOAPAction, Authorization, X-Requested-With")
-        self.send_header("Access-Control-Expose-Headers", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, SOAPAction")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -44,14 +73,16 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def proxy_forward(self, method):
-        """Префиксный прокси: /proxy/http://target/path → форвардит на target."""
         target = self.path[len("/proxy/"):]
         if not target.startswith("http://") and not target.startswith("https://"):
             self.send_error(400, "proxy target must be absolute http(s) URL")
             return
+        if not host_allowed(target):
+            print(f"[deny] {method} {target} (not in allowlist)")
+            self.send_error(403, "host not in allowlist")
+            return
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
-        # Передаем заголовки запроса дальше (кроме hop-by-hop и Host)
         skip = {"host", "connection", "content-length", "origin", "referer"}
         forward_headers = {}
         for k, v in self.headers.items():
@@ -77,90 +108,55 @@ class Handler(SimpleHTTPRequestHandler):
             if k.lower() in {"transfer-encoding", "connection", "content-length"}:
                 continue
             self.send_header(k, v)
-        # CORS уже добавляются в end_headers
         self.send_header("Content-Length", str(len(resp_body)))
         self.end_headers()
         self.wfile.write(resp_body)
-
-    def do_POST(self):
-        if self.path.startswith("/proxy/"):
-            self.proxy_forward("POST")
-            return
-        if self.path.rstrip("/") != "/report":
-            self.send_error(404, "POST only on /report or /proxy/<url>")
-            return
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
-        try:
-            data = json.loads(body.decode("utf-8")) if body else {}
-        except Exception as exc:
-            self.send_error(400, f"bad json: {exc}")
-            return
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = REPORTS_DIR / f"{ts}.json"
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[report] saved {path.relative_to(ROOT)} ({length} bytes)")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"saved": str(path.name)}).encode())
 
     def do_GET(self):
         if self.path.startswith("/proxy/"):
             self.proxy_forward("GET")
             return
         if self.path.startswith("/ping"):
-            print(f"[ping] from {self.client_address[0]}")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"pong")
             return
-        if self.path.startswith("/report-img"):
-            from urllib.parse import urlparse, parse_qs
-            qs = parse_qs(urlparse(self.path).query)
-            data_raw = qs.get("d", [""])[0]
-            try:
-                data = json.loads(data_raw)
-            except Exception:
-                data = {"raw": data_raw}
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            path = REPORTS_DIR / f"{ts}-img.json"
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[report-img] saved {path.relative_to(ROOT)}")
-            # 1x1 transparent gif
+        # Корень — короткая 200-OK подсказка вместо 404, чтобы health-checks были
+        # понятны, но НИКАКОЙ статики и листинга директорий.
+        if self.path in ("/", ""):
             self.send_response(200)
-            self.send_header("Content-Type", "image/gif")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"))
+            self.wfile.write(
+                b"lampa-keenetic-dlna proxy. POST /proxy/<dlna-url>. "
+                b"Allowlisted hosts: " + ", ".join(sorted(ALLOWED_HOSTS)).encode()
+            )
             return
-        if self.path == "/reports":
-            files = sorted(p.name for p in REPORTS_DIR.glob("*.json"))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(files).encode())
+        self.send_error(404, "not found")
+
+    def do_POST(self):
+        if self.path.startswith("/proxy/"):
+            self.proxy_forward("POST")
             return
-        if self.path == "/reports/last":
-            files = sorted(REPORTS_DIR.glob("*.json"))
-            if not files:
-                self.send_error(404, "no reports yet")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(files[-1].read_bytes())
-            return
-        super().do_GET()
+        self.send_error(404, "POST allowed only on /proxy/<url>")
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    os.chdir(ROOT)
+    args = sys.argv[1:]
+    port = int(os.environ.get("DLNA_PROXY_PORT") or "8780")
+    if args and args[0].isdigit():
+        port = int(args[0])
+        args = args[1:]
+    if "--allow" in args:
+        i = args.index("--allow")
+        if i + 1 < len(args):
+            ALLOWED_HOSTS.update(_parse_allow(args[i + 1]))
+
+    print(f"serving on http://0.0.0.0:{port}")
+    print(f"allowlist: {sorted(ALLOWED_HOSTS)}")
+    print(f"plugin endpoint: POST /proxy/<dlna-url>")
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"serving {ROOT} on http://0.0.0.0:{port}")
-    print(f"plugin url:   http://<твой-ip>:{port}/plugins/tizen-debug.js")
-    print(f"reports dir:  {REPORTS_DIR}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

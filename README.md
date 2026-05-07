@@ -35,7 +35,11 @@ CORS-заголовками. Без прокси плагин **техничес
 
 ### 1. Прокси на Кинетике (рекомендуемо)
 
-Если на роутере [установлен Entware](https://help.keenetic.com/hc/ru/articles/360021214160):
+Сначала [установи Entware](https://help.keenetic.com/hc/ru/articles/360021214160) на USB-стик в роутере (один раз, в web-интерфейсе).
+
+Дальше один из двух режимов:
+
+**1a. Локальный HTTP** (по умолчанию, без внешних сервисов)
 
 ```sh
 ssh root@<keenetic-ip>
@@ -43,22 +47,30 @@ opkg install ca-certificates
 curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scripts/entware-install.sh | sh
 ```
 
-Скрипт:
-- ставит `python3` и `cloudflared` (статичный бинарник под архитектуру)
-- кладёт `serve.py` в `/opt/lampa-keenetic-dlna/`
-- регистрирует `init.d`-сервис, автозапуск при старте Кинетика
-- запускает quick-туннель, печатает публичный HTTPS-URL
+В конце скрипт напечатает:
+```
+    http://<keenetic-ip>:8780/proxy/
+```
 
-Вывод в конце:
+Этот URL стабильный, не меняется, ничего не уходит наружу. Не работает только
+через web-LAMPA (lampa.mx) и на платформах с агрессивным Private Network Access.
+
+**1b. С Cloudflare-туннелем** (если 1a не работает на твоей платформе)
+
+```sh
+curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scripts/entware-install.sh | sh -s -- --tunnel
 ```
-    https://<random>.trycloudflare.com/proxy/
-```
-Скопируй URL — пригодится дальше.
+
+Получишь публичный HTTPS-URL вида `https://<random>.trycloudflare.com/proxy/`.
 
 > ⚠️ Quick-туннель `trycloudflare.com` **выдаёт новый URL при каждом
-> перезапуске**. После reboot Кинетика — `S99lampa-dlna status` показывает
-> текущий URL, надо обновить в настройках LAMPA. Для **постоянного URL** —
-> см. раздел [Cloudflare named tunnel](#cloudflare-named-tunnel).
+> перезапуске Кинетика**. `S99lampa-dlna status` покажет текущий — обнови
+> в настройках LAMPA. Для постоянного URL — [Cloudflare named tunnel](#cloudflare-named-tunnel).
+
+**Безопасность.** Прокси по умолчанию имеет allowlist: форвардит запросы
+**только** на `192.168.1.1:8200` (DLNA-сервер). Запросы на админку Кинетика
+(порт 80/443) и другие LAN-сервисы возвращают `403 Forbidden`. Допустимые
+хосты можно изменить через переменную окружения `DLNA_PROXY_ALLOW`.
 
 ### 2. Альтернативы прокси
 
