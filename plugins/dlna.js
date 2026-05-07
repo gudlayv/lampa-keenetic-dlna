@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.2';
+    var PLUGIN_VERSION = '0.5.3';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -353,6 +353,13 @@
             currentTab = tabId;
             tabsRow.find('.dlna-keenetic__tab').removeClass('dlna-keenetic__tab--active');
             tabsRow.find('[data-tab="' + tabId + '"]').addClass('dlna-keenetic__tab--active');
+            // Сразу перевешиваем фокус на новый active tab — не полагаемся на toggle handler
+            // (он no-op если controller уже активен, фокус оставался на прежнем tab).
+            var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
+            if (activeTab) {
+                Lampa.Controller.collectionSet(tabsRow);
+                Lampa.Controller.collectionFocus(activeTab, tabsRow);
+            }
             self.openCurrent({ keepFocusOnTab: true });
         }
 
@@ -453,11 +460,9 @@
 
             self.activity.loader(false);
             self.activity.toggle();
-            // Если переключаемся между вкладками — оставляем фокус в tabs-controller'е.
-            // Это сохраняет фокус на active tab, не сбрасывая на первый .selector списка.
-            if (opts.keepFocusOnTab) {
-                Lampa.Controller.toggle('dlna_tabs');
-            } else {
+            // Если переключаемся между вкладками — фокус уже стоит на active tab
+            // (поставлен в switchTab), ничего не трогаем.
+            if (!opts.keepFocusOnTab) {
                 Lampa.Controller.toggle('content');
             }
         }
