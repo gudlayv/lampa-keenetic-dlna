@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.6.0';
+    var PLUGIN_VERSION = '0.6.1';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -336,11 +336,11 @@
         }
 
         function renderFilterButton() {
+            // Используем стандартные LAMPA-классы simple-button simple-button--filter,
+            // получаем нативный вид кнопки и стандартное focus-поведение.
             filterBtn = $(
-                '<div class="selector dlna-keenetic__filter">' +
-                  '<span class="dlna-keenetic__filter-label">Фильтр</span>' +
+                '<div class="simple-button simple-button--filter selector dlna-keenetic__filter">' +
                   '<span class="dlna-keenetic__filter-value"></span>' +
-                  '<span class="dlna-keenetic__filter-caret">▾</span>' +
                 '</div>'
             );
             filterBtn.on('hover:enter', openFilterSelect);
@@ -348,7 +348,7 @@
 
         function updateFilterLabel() {
             var t = TABS.find(function (x) { return x.id === currentTab; });
-            filterBtn.find('.dlna-keenetic__filter-value').text(t ? t.title : '');
+            filterBtn.find('.dlna-keenetic__filter-value').text('Фильтр: ' + (t ? t.title : ''));
         }
 
         function openFilterSelect() {
@@ -572,7 +572,7 @@
             var poster = $('<div class="dlna-row__poster" style="' + posterStyle + '"></div>');
             poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
             if (savedTl && savedTl.percent >= 80) {
-                poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+                poster.append('<div class="dlna-row__watched" style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
             }
             line.append(poster);
 
@@ -590,7 +590,7 @@
                     });
                     poster.empty();
                     if (savedTl && savedTl.percent >= 80) {
-                        poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+                        poster.append('<div class="dlna-row__watched" style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
                     }
                 }
                 if (ep && ep.overview) {
@@ -724,7 +724,7 @@
                 up:    function () { Lampa.Controller.toggle('head'); },
                 down:  function () { Lampa.Controller.toggle('content'); },
                 left:  function () { Lampa.Controller.toggle('menu'); },
-                right: function () { /* пока ничего */ },
+                right: function () { openFilterSelect(); },
                 back:  function () { Lampa.Activity.backward(); }
             });
 
@@ -751,7 +751,45 @@
                 }
             });
             Lampa.Controller.toggle('content');
+            // При возврате в активити (из плеера) — обновляем визуальный прогресс
+            // на строках. LAMPA пишет timeline в Storage сама, но наш DOM был
+            // отрисован до начала просмотра.
+            refreshProgress();
         };
+
+        function refreshProgress() {
+            if (!body || !Lampa.Timeline || !Lampa.Timeline.view) return;
+            body.find('.dlna-row[data-hash]').each(function () {
+                var row = $(this);
+                var hash = row.attr('data-hash');
+                if (!hash) return;
+                var tl = Lampa.Timeline.view(hash);
+                if (!tl) return;
+
+                var info = row.find('.dlna-row__info');
+                var bar = info.find('.dlna-row__progress');
+                if (tl.percent > 0) {
+                    if (!bar.length) {
+                        bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:#7ed957; width:0%;"></div></div>');
+                        info.append(bar);
+                    }
+                    bar.find('div').css('width', Math.min(100, tl.percent) + '%');
+                } else if (bar.length) {
+                    bar.remove();
+                }
+
+                // Watched-badge ✓ при ≥80%
+                var poster = row.find('.dlna-row__poster');
+                var badge = poster.find('.dlna-row__watched');
+                if (tl.percent >= 80) {
+                    if (!badge.length) {
+                        poster.append('<div class="dlna-row__watched" style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+                    }
+                } else if (badge.length) {
+                    badge.remove();
+                }
+            });
+        }
 
         this.pause = function () {};
         this.stop = function () {};
@@ -771,11 +809,9 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
-            // Filter button: одна "кнопка-выпадушка" в head
-            '.dlna-keenetic__filter{display:inline-flex;align-items:center;gap:0.6em;padding:0.55em 1.1em;border-radius:0.4em;background:rgba(255,255,255,0.08);font-weight:600;}' +
-            '.dlna-keenetic__filter-label{opacity:0.6;}' +
+            // Filter button: используем стандартный LAMPA-класс .simple-button--filter,
+            // только окрашиваем value жёлтым.
             '.dlna-keenetic__filter-value{color:#ffd966;}' +
-            '.dlna-keenetic__filter-caret{opacity:0.6;font-size:0.85em;}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
