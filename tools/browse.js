@@ -46,13 +46,18 @@ function parseArgs(argv) {
         deviceScaleFactor: 1,
         userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
-    // Пропускаем мастер выбора языка — LAMPA проверяет localStorage.language до запуска
-    await ctx.addInitScript(() => {
+    // Пропускаем мастер выбора языка + предзаполняем настройки плагина
+    // (DLNA-адрес и proxy URL — для отладки на dev cf-tunnel)
+    const devProxy = process.env.DLNA_PROXY || '';
+    const devDlna = process.env.DLNA_ADDR || '192.168.1.1:8200';
+    await ctx.addInitScript((cfg) => {
         try {
             window.localStorage.setItem('language', 'ru');
             window.localStorage.setItem('tmdb_lang', 'ru');
+            window.localStorage.setItem('dlna_address', cfg.dlna);
+            if (cfg.proxy) window.localStorage.setItem('dlna_proxy', cfg.proxy);
         } catch (e) {}
-    });
+    }, { proxy: devProxy, dlna: devDlna });
     const page = await ctx.newPage();
 
     page.on('console', msg => console.log('[' + msg.type() + ']', msg.text()));

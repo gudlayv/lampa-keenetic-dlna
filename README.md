@@ -1,74 +1,187 @@
-# mlp — DLNA-плагин для LAMPA на Samsung Tizen 6
+# lampa-keenetic-dlna
 
-Цель: получить рабочий DLNA-клиент в LAMPA на Samsung Neo QLED (Tizen 6+),
-который видит DLNA-сервер на Кинетике и играет видео в плеере LAMPA.
+DLNA-клиент для [LAMPA](https://github.com/yumata/lampa-source), работает с
+DLNA-сервером Кинетика (MiniDLNA). Видеотека на USB-диске роутера превращается
+в опрятный список с постерами TMDB, прогрессом просмотра и навигацией как в
+самой LAMPA.
 
-Существующий плагин (`http://cub.red/plugin/dlna`) сделан под Tizen 4–5 и
-завязан на `webapis.allshare.serviceconnector`, которого в Tizen 6 уже нет.
+![screenshot](docs/screenshot.png)
 
-## План
+## Возможности
 
-1. **Debug-плагин** (`plugins/tizen-debug.js`) — собирает дамп `window.tizen` и
-   `window.webapis` на конкретном TV и шлет его на dev-сервер на ноуте.
-2. На основе дампа понимаем, какие API вообще остались для UPnP/SSDP/сети.
-3. Пишем DLNA-плагин (`plugins/dlna.js`, появится позже) — discovery, browse,
-   воспроизведение через `Lampa.Player`.
+- Главная — `Все / Фильмы / Сериалы / Папки`, фильтр через `new Lampa.Filter`
+- Постеры, рейтинг, описание из TMDB на каждой строке
+- Серии сериала автоматически группируются по `S01E03` / `1x03` →
+  одна карточка сезона, внутри список серий с TMDB-кадрами
+- Прогресс-бар на строке (timeline LAMPA), бейдж «просмотрено» при ≥ 80 %
+- При запуске видео — попадает в **Историю** LAMPA, при возврате в плагин
+  прогресс-бар обновляется автоматически
+- Стандартный пульт LAMPA, всё навигируется
 
-## Быстрый старт (локальная отладка)
+## Зачем нужен прокси
 
-Ноут и оба TV в одной Wi-Fi сети.
+Tizen / Android-WebView / лампа-веб блокируют прямые SOAP-запросы плагина
+к Кинетику:
 
-```bash
-# с ноута
-python3 serve.py
+1. **CORS preflight.** Браузер шлёт `OPTIONS` перед `POST /ctl/ContentDir` с
+   `SOAPAction`. MiniDLNA отвечает `501 Not Implemented` → preflight падает.
+2. **Private Network Access.** LAMPA загружается с `file://` или публичного
+   домена; браузер режет XHR/fetch на `192.168.x.x`.
+
+Решение — HTTPS-прокси, форвардит запросы на DLNA-сервер с правильными
+CORS-заголовками. Без прокси плагин **технически** не работает.
+
+## Быстрый старт
+
+### 1. Прокси на Кинетике (рекомендуемо)
+
+Если на роутере [установлен Entware](https://help.keenetic.com/hc/ru/articles/360021214160):
+
+```sh
+ssh root@<keenetic-ip>
+opkg install ca-certificates
+curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scripts/entware-install.sh | sh
 ```
 
-Сервер слушает `0.0.0.0:8080`, отдает все файлы репо и принимает отчеты от
-плагина в `POST /report`.
+Скрипт:
+- ставит `python3` и `cloudflared` (статичный бинарник под архитектуру)
+- кладёт `serve.py` в `/opt/lampa-keenetic-dlna/`
+- регистрирует `init.d`-сервис, автозапуск при старте Кинетика
+- запускает quick-туннель, печатает публичный HTTPS-URL
 
-В LAMPA на TV:
+Вывод в конце:
+```
+    https://<random>.trycloudflare.com/proxy/
+```
+Скопируй URL — пригодится дальше.
 
-1. Меню → Расширения (или Настройки → Плагины) → Добавить.
-2. URL: `http://192.168.1.129:8080/plugins/tizen-debug.js`
-   (поменяй IP на свой; узнать: `ipconfig getifaddr en0`).
-3. После установки в боковом меню появится пункт **Tizen Debug**.
-4. Открыть его → нажать **Отправить отчет**. На ноуте появится файл
-   `reports/<timestamp>.json`.
+> ⚠️ Quick-туннель `trycloudflare.com` **выдаёт новый URL при каждом
+> перезапуске**. После reboot Кинетика — `S99lampa-dlna status` показывает
+> текущий URL, надо обновить в настройках LAMPA. Для **постоянного URL** —
+> см. раздел [Cloudflare named tunnel](#cloudflare-named-tunnel).
 
-Также: `GET http://<ip>:8080/reports/last` — последний отчет в браузере с ноута.
+### 2. Альтернативы прокси
 
-## Что собирает debug-плагин
+- **Lampac** ([immisterio/Lampac](https://github.com/immisterio/Lampac)) — у него
+  встроенный `/proxy`. Поставить на NAS / Raspberry Pi / Docker / VPS.
+- **Свой VPS** + WireGuard от Кинетика → запустить `serve.py` на VPS.
+- **Локальный комп** с Mac/Linux: `python3 serve.py 8080` + `cloudflared tunnel
+  --url http://localhost:8080`. Удобно для разработки, не для постоянной работы.
 
-- `navigator.userAgent`, размеры экрана, `Lampa.Platform.*`
-- Quick checks: есть ли `webapis.allshare`, `webapis.network`, `webapis.avplay`,
-  `webapis.productinfo`, `tizen.systeminfo`, `tizen.network`, `tizen.SocketAddress` и т.д.
-- `tizen.systeminfo.getCapability(...)` для версии платформы, модели, фич сети
-  (`network.upnp`, `network.dlna`, `network.wifi`).
-- `webapis.productinfo.*` — модель, прошивка, реальное название.
-- Полный обход `window.tizen` и `window.webapis` до глубины 3.
+### 3. Установка плагина в LAMPA
 
-Все это пишется и в `console.log` — если подключен Web Inspector
-(Tizen developer mode + `chrome://inspect`), смотри во вкладке Console.
-
-## Где меняется адрес отчета
-
-В файле `plugins/tizen-debug.js` константа `REPORT_ENDPOINT_DEFAULT`. Либо
-можно положить в `Lampa.Storage` под ключ `tizen_debug_report_url` — тогда
-не надо править код.
-
-## Дальше
-
-Когда отчеты с обоих TV собраны — кладем их в `docs/findings.md` с выводами
-(какие API доступны, какие нет, что использовать для DLNA), и переходим
-к написанию DLNA-плагина.
-
-## Хостинг (на потом)
-
-Когда плагин стабилизируется — переключим URL на raw.githubusercontent.com,
-чтобы не держать ноут включенным:
+В LAMPA на TV: **Расширения → Добавить URL**
 
 ```
-https://raw.githubusercontent.com/<user>/mlp/main/plugins/tizen-debug.js
+https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/plugins/dlna.js
 ```
 
-Telegram/QR — позже.
+> `cub.red` подгружает плагины через свой кеш. Если правишь код, добавляй
+> querystring (`?v=2`) чтобы не подхватился старый.
+
+### 4. Настройка плагина
+
+В LAMPA: **Настройки → Keenetic DLNA**
+
+| Поле | Значение |
+|---|---|
+| Адрес DLNA-сервера | `192.168.1.1:8200` (или `<ip>:<порт>` твоего MiniDLNA) |
+| Прокси URL | URL из шага 1, например `https://abcd-1234.trycloudflare.com/proxy/` |
+
+Открой **Расширения → Keenetic DLNA** в боковом меню. Должен загрузиться
+список «Все».
+
+## Cloudflare named tunnel
+
+Чтобы URL не менялся при каждом перезапуске:
+
+1. Заведи бесплатный аккаунт на [dash.cloudflare.com](https://dash.cloudflare.com/).
+2. Привяжи любой домен (можно из freenom / купить за $1).
+3. На Кинетике:
+   ```sh
+   /opt/bin/cloudflared tunnel login
+   /opt/bin/cloudflared tunnel create lampa-dlna
+   /opt/bin/cloudflared tunnel route dns lampa-dlna lampa-dlna.<твой-домен>.com
+   ```
+4. Конфиг `/opt/etc/cloudflared/config.yml`:
+   ```yaml
+   tunnel: <UUID-туннеля-из-вывода-create>
+   credentials-file: /root/.cloudflared/<UUID>.json
+   ingress:
+     - hostname: lampa-dlna.<твой-домен>.com
+       service: http://localhost:8780
+     - service: http_status:404
+   ```
+5. Замени в `/opt/lampa-keenetic-dlna/start.sh` строку с `cloudflared tunnel --url ...`
+   на `cloudflared tunnel run lampa-dlna`.
+6. В LAMPA → Настройки → Keenetic DLNA → Прокси URL:
+   `https://lampa-dlna.<твой-домен>.com/proxy/`
+
+URL стабильный, переживает любые перезапуски.
+
+## Архитектура
+
+```
+[ TV ]                                              [ Кинетик ]
+LAMPA → plugin/dlna.js  ──HTTPS──▶  Cloudflare ──▶  cloudflared
+                                                       ↓
+                                                    serve.py:8780
+                                                       ↓
+                                          MiniDLNA :8200 (ContentDirectory)
+                                                       ↓
+                                                  USB-диск /media/...
+```
+
+- `serve.py` — простой Python-прокси: `POST /proxy/<url>` форвардит запрос с
+  CORS-заголовками. Также: `GET /ping`, `GET /reports/last` (для отладки).
+- `cloudflared` — туннель Cloudflare → выдаёт HTTPS-URL.
+- TV-плагин шлёт `POST <proxy>/proxy/http://192.168.1.1:8200/ctl/ContentDir`
+  с SOAPAction-заголовком, парсит DIDL-Lite ответ, рисует UI.
+
+Для воспроизведения медиа-потока берётся **прямой URL Кинетика**
+(`http://192.168.1.1:8200/MediaItems/N.mkv`) — у Tizen avplay нет CORS-
+ограничений, играет напрямую.
+
+## Структура репо
+
+```
+plugins/
+  dlna.js            — основной плагин LAMPA
+serve.py             — Python HTTP-прокси для CORS-обхода
+scripts/
+  entware-install.sh — установка прокси на Кинетике через Entware
+docs/
+  lampa-api.md       — заметки по Lampa.Reguest, Component, Filter
+  findings.md        — отчёт по Tizen 6 / MiniDLNA исследованию
+  refs/              — исходники reference-плагинов LAMPA
+  superpowers/specs/ — design-доки
+tools/
+  browse.js          — Playwright-обёртка: открывает LAMPA в Chrome,
+                       инжектит плагин, делает скриншот. Для отладки.
+```
+
+## Разработка
+
+```sh
+# Поднять локальный прокси для итераций
+python3 serve.py 8080
+
+# В другом терминале — туннель
+cloudflared tunnel --url http://localhost:8080
+```
+
+Подключить плагин в LAMPA по URL:
+```
+https://<ваш-tunnel>.trycloudflare.com/plugins/dlna.js?v=dev
+```
+
+Headless-отладка в Chrome (без TV):
+```sh
+npm install
+node tools/browse.js --component keenetic_dlna --keys "up,enter" --wait 5000
+# смотрит результат в shots/lampa-<timestamp>.png
+```
+
+## Лицензия
+
+MIT.

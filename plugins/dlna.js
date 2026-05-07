@@ -4,13 +4,27 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.6.4';
+    var PLUGIN_VERSION = '0.7.0';
 
-    // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
-    var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
-    var DLNA_BASE = 'http://192.168.1.1:8200';
-    var CONTROL_URL = DLNA_BASE + '/ctl/ContentDir';
+    // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
+    // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
+    // dlna_proxy   — публичный HTTPS-URL прокси (cloudflared tunnel + serve.py).
+    //                Без прокси TV-браузер не пробьёт CORS preflight + Private Network Access.
+    var STORAGE_DLNA_ADDR  = 'dlna_address';
+    var STORAGE_DLNA_PROXY = 'dlna_proxy';
+    var DEFAULT_DLNA_ADDR  = '192.168.1.1:8200';
     var SOAPNS = 'urn:schemas-upnp-org:service:ContentDirectory:1';
+
+    function dlnaAddr() {
+        return (Lampa.Storage.field(STORAGE_DLNA_ADDR) || DEFAULT_DLNA_ADDR).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    }
+    function proxyBase() {
+        var p = Lampa.Storage.field(STORAGE_DLNA_PROXY) || '';
+        if (!p) return '';
+        if (!/^https?:\/\//.test(p)) p = 'https://' + p;
+        return p.replace(/\/+$/, '') + '/';
+    }
+    function controlUrl() { return 'http://' + dlnaAddr() + '/ctl/ContentDir'; }
 
     function escapeHtml(s) {
         return String(s).replace(/[<>&"]/g, function (c) {
@@ -35,6 +49,11 @@
         '</svg>';
 
     function browse(objectId, success, error) {
+        var proxy = proxyBase();
+        if (!proxy) {
+            error({ status: 0, message: 'no_proxy' });
+            return;
+        }
         var soapBody =
             '<?xml version="1.0"?>\n' +
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
@@ -48,7 +67,7 @@
             '</u:Browse></s:Body></s:Envelope>';
 
         $.ajax({
-            url: PROXY_BASE + CONTROL_URL,
+            url: proxy + controlUrl(),
             type: 'POST',
             dataType: 'xml',
             data: soapBody,
@@ -408,6 +427,12 @@
                 return;
             }
 
+            // Без прокси никаких запросов — сразу красная плашка с инструкцией
+            if (!proxyBase()) {
+                browseError({ message: 'no_proxy' });
+                return;
+            }
+
             // "Папки" — Browse по DLNA-id из стека
             if (currentTab === 'folders') {
                 browse(top.id, function (entries) { renderEntries(entries, opts); }, browseError);
@@ -439,6 +464,19 @@
 
         function browseError(err) {
             scroll.clear();
+            if (err && err.message === 'no_proxy') {
+                var msg = $('<div style="margin:1em; padding:1.2em; background:rgba(255,217,102,0.15); border-left:4px solid #ffd966; border-radius:0.4em; font-size:0.95em; line-height:1.5;"></div>');
+                msg.html(
+                    '<b>Прокси не настроен</b><br><br>' +
+                    'TV-браузер не может ходить на DLNA-сервер напрямую (CORS / Private Network Access). ' +
+                    'Нужен HTTPS-прокси, который форвардит запросы на Кинетик.<br><br>' +
+                    'Открой <b>Настройки → Keenetic DLNA</b> и заполни поле <b>«Прокси URL»</b>.<br><br>' +
+                    'Как поднять прокси — README: <a href="https://github.com/gudlayv/lampa-keenetic-dlna#proxy" style="color:#ffd966;">github.com/…/lampa-keenetic-dlna</a>'
+                );
+                scroll.append(msg);
+                self.activity.loader(false);
+                return;
+            }
             var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em; font-size:0.9em; word-break:break-all;"></div>');
             box.append('<b>Ошибка Browse:</b><br>' + escapeHtml(JSON.stringify(err)));
             scroll.append(box);
@@ -835,6 +873,29 @@
         };
 
         Lampa.Component.add(manifest.component, Component);
+        registerSettings();
+
+        function registerSettings() {
+            if (!Lampa.SettingsApi) return;
+            Lampa.SettingsApi.addComponent({
+                component: 'keenetic_dlna',
+                name: 'Keenetic DLNA',
+                icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><polygon points="10 9 16 12 10 15" fill="currentColor"/></svg>'
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_DLNA_ADDR, type: 'input', placeholder: '192.168.1.1:8200', values: '', default: DEFAULT_DLNA_ADDR },
+                field: { name: 'Адрес DLNA-сервера', description: 'IP:порт MiniDLNA на Кинетике. По умолчанию 192.168.1.1:8200.' }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_DLNA_PROXY, type: 'input', placeholder: 'https://your-tunnel.trycloudflare.com/proxy/', values: '', default: '' },
+                field: {
+                    name: 'Прокси URL',
+                    description: 'HTTPS-прокси для обхода CORS preflight и Private Network Access. Без него плагин не работает. См. README.'
+                }
+            });
+        }
 
         function addMenu() {
             if ($('.menu .menu__list [data-action="keenetic_dlna"]').length) return;
