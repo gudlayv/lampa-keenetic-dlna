@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '0.6.0';
+    var PLUGIN_VERSION = '0.6.1';
     var REPORT_ENDPOINT_KEY = 'tizen_debug_report_url';
     var REPORT_ENDPOINT_DEFAULT = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/report';
 
@@ -234,21 +234,25 @@
 
                 view.append('<div style="font-size:1.6em; font-weight:bold; color:#3a73ff; margin-bottom:0.4em;">Tizen Debug v' + PLUGIN_VERSION + '</div>');
 
-                var hdr = $('<div style="margin-bottom:0.8em; padding:0.6em 0.8em; background:rgba(58,115,255,0.18); border-left:4px solid #3a73ff; border-radius:0.3em;"></div>');
-                hdr.append('<div style="font-size:1.4em; font-weight:bold;">' + escapeHtml(model) + ' · Tizen ' + escapeHtml(tzVer) + '</div>');
-                hdr.append('<div style="font-size:0.85em; opacity:0.8;">build: ' + escapeHtml(fwBuild) + '</div>');
+                var hdr = $('<div style="margin-bottom:0.8em; padding:0.5em 0.7em; background:rgba(58,115,255,0.18); border-left:4px solid #3a73ff; border-radius:0.3em; font-size:0.95em;"></div>');
+                hdr.append('<div style="font-weight:bold;">' + escapeHtml(model) + ' · Tizen ' + escapeHtml(tzVer) + '</div>');
                 hdr.append('<div style="font-size:0.85em; opacity:0.8;">network.upnp=' + escapeHtml(String(hasUpnp)) + ' · network.dlna=' + escapeHtml(String(hasDlna)) + '</div>');
                 view.append(hdr);
 
-                // hello-ping чтобы лог сервера показал, что новая версия плагина реально запустилась
+                // hello-ping через Lampa.Reguest.native — единственный канал что работает в plugin-контексте
                 try {
-                    var helloUrl = (function () {
-                        var url = reportEndpoint();
-                        return url.replace(/\/report$/, '') + '/ping?from=create&v=' + encodeURIComponent(PLUGIN_VERSION);
-                    })();
-                    var helloImg = new Image();
-                    helloImg.src = helloUrl + '&_=' + Date.now();
+                    var helloUrl = reportEndpoint().replace(/\/report$/, '') + '/ping?from=create&v=' + encodeURIComponent(PLUGIN_VERSION);
+                    if (window.Lampa && Lampa.Reguest) {
+                        var helloReq = new Lampa.Reguest();
+                        helloReq.native(helloUrl, function () {}, function () {});
+                    }
                 } catch (e) {}
+
+                // Transport tests — НАВЕРХУ (чтобы влезали в первый экран без скролла)
+                view.append('<h3 style="margin:0.6em 0 0.3em 0; color:#ffd966;">Transport tests</h3>');
+                var transportsBox = $('<div></div>');
+                view.append(transportsBox);
+                runTransportTests(transportsBox);
 
                 var btnRefresh = $('<div class="selector" style="display:inline-block; padding:0.5em 1em; background:#444; border-radius:0.3em; margin-bottom:0.6em;">Пересобрать</div>');
                 btnRefresh.on('hover:enter', function () {
@@ -283,11 +287,6 @@
                 piBlock.text(JSON.stringify(report.productinfo, null, 1));
                 view.append(piBlock);
 
-                view.append('<h3 style="margin:0.8em 0 0.3em 0; color:#ffd966;">Transport tests (LAN HTTP)</h3>');
-                var transportsBox = $('<div></div>');
-                view.append(transportsBox);
-                runTransportTests(transportsBox);
-
                 scroll.append(view);
                 html.append(scroll.render());
 
@@ -296,65 +295,62 @@
             };
 
             function runTransportTests(container) {
-                var base = (function () {
-                    var url = reportEndpoint();
-                    return url.replace(/\/report$/, '');
-                })();
-                var pingUrl = base + '/ping';
+                var tunnelBase = reportEndpoint().replace(/\/report$/, '');
+                var lanBase = 'http://192.168.1.1';   // Кинетик/роутер по умолчанию
+                var publicUrl = 'https://itunes.apple.com/search?term=test&media=movie';
+
+                function nativeGet(label, url, cb) {
+                    try {
+                        if (!window.Lampa || !Lampa.Reguest) return cb(label, 'NO Lampa.Reguest');
+                        var r = new Lampa.Reguest();
+                        var done = false;
+                        var t0 = Date.now();
+                        var fin = function (msg) { if (!done) { done = true; cb(label, msg + ' · ' + (Date.now() - t0) + 'ms'); } };
+                        r.timeout && r.timeout(5000);
+                        r.native(url,
+                            function (resp) { fin('OK · ' + String(typeof resp === 'object' ? JSON.stringify(resp) : resp).slice(0, 60)); },
+                            function (err)  { fin('ERR ' + JSON.stringify(err).slice(0, 80)); }
+                        );
+                        setTimeout(function () { fin('ERR client-timeout'); }, 7000);
+                    } catch (e) { cb(label, 'ERR ' + e.message); }
+                }
 
                 var tests = [
-                    { name: 'fetch GET', run: function (cb) {
-                        if (!window.fetch) return cb('NO fetch');
-                        fetch(pingUrl).then(function (r) { return r.text().then(function (t) { cb('HTTP ' + r.status + ' · ' + t.slice(0, 80)); }); })
-                                      .catch(function (e) { cb('ERR ' + e.message); });
-                    }},
-                    { name: 'XMLHttpRequest GET', run: function (cb) {
-                        try {
-                            var x = new XMLHttpRequest();
-                            x.open('GET', pingUrl);
-                            x.onload = function () { cb('HTTP ' + x.status + ' · ' + (x.responseText || '').slice(0, 80)); };
-                            x.onerror = function () { cb('ERR network'); };
-                            x.ontimeout = function () { cb('ERR timeout'); };
-                            x.timeout = 5000;
-                            x.send();
-                        } catch (e) { cb('ERR ' + e.message); }
-                    }},
-                    { name: 'Lampa.Reguest.silent', run: function (cb) {
-                        try {
-                            if (!Lampa.Reguest) return cb('NO Lampa.Reguest');
-                            var r = new Lampa.Reguest();
-                            if (typeof r.silent === 'function') {
-                                r.silent(pingUrl, function (resp) { cb('OK · ' + String(resp).slice(0, 80)); },
-                                                  function (err) { cb('ERR ' + JSON.stringify(err).slice(0, 80)); });
-                            } else if (typeof r.native === 'function') {
-                                r.native(pingUrl, function (resp) { cb('OK · ' + String(resp).slice(0, 80)); },
-                                                  function (err) { cb('ERR ' + JSON.stringify(err).slice(0, 80)); });
-                            } else {
-                                cb('NO silent/native methods');
-                            }
-                        } catch (e) { cb('ERR ' + e.message); }
-                    }},
-                    { name: '<img> ping', run: function (cb) {
-                        try {
-                            var img = new Image();
-                            var done = false;
-                            img.onload = function () { if (!done) { done = true; cb('OK loaded'); } };
-                            img.onerror = function () { if (!done) { done = true; cb('ERR onerror'); } };
-                            setTimeout(function () { if (!done) { done = true; cb('ERR timeout'); } }, 5000);
-                            img.src = pingUrl + '?_=' + Date.now();
-                        } catch (e) { cb('ERR ' + e.message); }
-                    }}
+                    { name: 'native: cf-tunnel HTTPS', url: tunnelBase + '/ping?t=cf' },
+                    { name: 'native: LAN router (192.168.1.1)', url: lanBase + '/' },
+                    { name: 'native: itunes.apple.com', url: publicUrl },
+                    { name: 'fetch: cf-tunnel HTTPS', url: tunnelBase + '/ping?t=fetch', method: 'fetch' },
+                    { name: 'XHR: cf-tunnel HTTPS', url: tunnelBase + '/ping?t=xhr', method: 'xhr' }
                 ];
 
                 tests.forEach(function (t) {
-                    var line = $('<div style="padding:0.3em 0.6em; margin-bottom:0.15em; background:rgba(255,255,255,0.04); border-left:3px solid #888;"></div>');
+                    var line = $('<div style="padding:0.3em 0.6em; margin-bottom:0.15em; background:rgba(255,255,255,0.04); border-left:3px solid #888; font-size:0.9em;"></div>');
                     line.append('<b>' + escapeHtml(t.name) + '</b>: <span class="result" style="color:#ffd966;">running…</span>');
                     container.append(line);
-                    t.run(function (result) {
-                        var ok = result.indexOf('HTTP 200') === 0 || result.indexOf('OK') === 0;
+
+                    var setRes = function (msg) {
+                        var ok = msg.indexOf('OK') === 0 || msg.indexOf('HTTP 200') === 0;
                         line.css('border-left-color', ok ? '#7ed957' : '#ff6464');
-                        line.find('.result').css('color', ok ? '#7ed957' : '#ff6464').text(result);
-                    });
+                        line.find('.result').css('color', ok ? '#7ed957' : '#ff6464').text(msg);
+                    };
+
+                    if (t.method === 'fetch') {
+                        if (!window.fetch) return setRes('NO fetch');
+                        fetch(t.url).then(function (r) { return r.text().then(function (txt) { setRes('HTTP ' + r.status + ' · ' + txt.slice(0, 40)); }); })
+                                    .catch(function (e) { setRes('ERR ' + e.message); });
+                    } else if (t.method === 'xhr') {
+                        try {
+                            var x = new XMLHttpRequest();
+                            x.open('GET', t.url);
+                            x.onload = function () { setRes('HTTP ' + x.status); };
+                            x.onerror = function () { setRes('ERR network'); };
+                            x.ontimeout = function () { setRes('ERR timeout'); };
+                            x.timeout = 5000;
+                            x.send();
+                        } catch (e) { setRes('ERR ' + e.message); }
+                    } else {
+                        nativeGet(t.name, t.url, function (_lbl, msg) { setRes(msg); });
+                    }
                 });
             }
 
