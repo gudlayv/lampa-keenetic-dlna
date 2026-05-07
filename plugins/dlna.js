@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.4.1';
+    var PLUGIN_VERSION = '0.4.2';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -568,10 +568,11 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
-            // Selector: тень вместо рамки/scale, чтобы UI не дёргался
-            '.dlna-keenetic .selector{transition:box-shadow 0.15s ease;position:relative;}' +
+            // Selector: только легкое осветление фона на focus.
+            // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
+            '.dlna-keenetic .selector{position:relative;}' +
             '.dlna-keenetic .selector.focus,' +
-            '.dlna-keenetic .selector.hover{box-shadow:0 0 0 0.2em #ffd966,0 0 1.2em rgba(255,217,102,0.35);outline:none;}' +
+            '.dlna-keenetic .selector.hover{background:rgba(255,255,255,0.18)!important;}' +
             // SVG — ограничиваем размер, иначе LAMPA-стили растягивают на 100%
             '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
             '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
