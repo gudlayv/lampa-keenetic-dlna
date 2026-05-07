@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.1.3';
+    var PLUGIN_VERSION = '0.2.0';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -109,6 +109,45 @@
         return n.toFixed(n < 10 ? 1 : 0) + ' ' + units[i];
     }
 
+    // Парсим имя файла: пробуем выделить чистое название и год
+    // "Wake.Up.Dead.Man.A.Knives.Out.Mystery.2025.2160p_RHS" → {title: "Wake Up Dead Man A Knives Out Mystery", year: 2025}
+    function parseFilename(name) {
+        // убираем расширение если есть
+        name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        var yearMatch = name.match(/[._\s\-(](19|20)\d{2}[._\s\-)]/);
+        if (yearMatch) {
+            var idx = yearMatch.index;
+            var year = parseInt(name.substr(idx + 1, 4), 10);
+            var title = name.substring(0, idx).replace(/[._]+/g, ' ').trim();
+            return { title: title, year: year };
+        }
+        return { title: name.replace(/[._]+/g, ' ').trim(), year: null };
+    }
+
+    // TMDB search через API ключ LAMPA
+    var tmdbCache = {};
+    function tmdbSearch(title, year, cb) {
+        var key = title + '|' + (year || '');
+        if (tmdbCache[key]) { cb(tmdbCache[key]); return; }
+        if (!window.Lampa || !Lampa.TMDB) { cb(null); return; }
+        var url = Lampa.TMDB.api('search/movie?api_key=' + Lampa.TMDB.key() +
+            '&language=ru&query=' + encodeURIComponent(title) +
+            (year ? '&year=' + year : '') +
+            '&include_adult=false');
+        var network = new Lampa.Reguest();
+        network.timeout(10000);
+        network.silent(url, function (data) {
+            var hit = (data && data.results && data.results[0]) || null;
+            tmdbCache[key] = hit;
+            cb(hit);
+        }, function () { cb(null); });
+    }
+
+    function tmdbPosterUrl(posterPath, size) {
+        if (!posterPath || !window.Lampa || !Lampa.TMDB) return '';
+        return Lampa.TMDB.image('t/p/' + (size || 'w200') + posterPath);
+    }
+
     function Component() {
         var stack = [{ id: '0', title: 'Keenetic Ultra' }];
         var html, scroll, self = this;
@@ -146,23 +185,77 @@
                 }
 
                 entries.forEach(function (entry) {
-                    var line = $('<div class="selector" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
-                    var icon = entry.isFolder ? ICON_FOLDER : ICON_VIDEO;
-                    line.append('<div><b>' + icon + escapeHtml(entry.title) + '</b></div>');
-                    var meta = [];
-                    if (entry.resolution) meta.push(entry.resolution);
-                    if (entry.duration) meta.push(entry.duration);
-                    if (entry.size) meta.push(formatSize(entry.size));
-                    if (meta.length) {
-                        line.append('<div style="font-size:0.8em; opacity:0.65; margin-top:0.2em;">' + escapeHtml(meta.join(' · ')) + '</div>');
+                    var line;
+                    if (entry.isFolder) {
+                        line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
+                        line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
+                    } else {
+                        // Видео — раскладка с местом под постер
+                        line = $('<div class="selector dlna-row dlna-row--video" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
+                        var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center;"></div>');
+                        poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
+                        line.append(poster);
+
+                        var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
+                        info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em; word-break:break-word;">' + escapeHtml(entry.title) + '</div>');
+                        var localMeta = [];
+                        if (entry.resolution) localMeta.push(entry.resolution);
+                        if (entry.duration) localMeta.push(entry.duration);
+                        if (entry.size) localMeta.push(formatSize(entry.size));
+                        if (localMeta.length) {
+                            info.append('<div class="dlna-row__local" style="font-size:0.78em; opacity:0.6; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
+                        }
+                        info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
+                        line.append(info);
+
+                        // Async TMDB enrichment
+                        var parsed = parseFilename(entry.title);
+                        tmdbSearch(parsed.title, parsed.year, function (hit) {
+                            var box = info.find('.dlna-row__tmdb');
+                            if (!hit) {
+                                box.text(parsed.year ? ('TMDB: не найдено · ' + parsed.title + ' (' + parsed.year + ')') : 'TMDB: не найдено').css('color', '#888');
+                                return;
+                            }
+                            // Заменяем заголовок на TMDB-название
+                            var tmdbTitle = hit.title || hit.original_title || parsed.title;
+                            var year = (hit.release_date || '').slice(0, 4);
+                            info.find('.dlna-row__title').text(tmdbTitle + (year ? ' (' + year + ')' : ''));
+                            // Метаданные
+                            var rating = hit.vote_average ? '★ ' + hit.vote_average.toFixed(1) : '';
+                            var orig = (hit.original_title && hit.original_title !== tmdbTitle) ? hit.original_title : '';
+                            var bits = [];
+                            if (rating) bits.push('<span style="color:#ffd966;">' + rating + '</span>');
+                            if (orig) bits.push('<span style="opacity:0.7;">' + escapeHtml(orig) + '</span>');
+                            box.html(bits.join(' · ') || '');
+                            // Постер
+                            if (hit.poster_path) {
+                                var url = tmdbPosterUrl(hit.poster_path, 'w200');
+                                poster.css({
+                                    'background-image': 'url("' + url + '")',
+                                    'background-size': 'cover',
+                                    'background-position': 'center'
+                                });
+                                poster.empty();
+                            }
+                            // Описание добавим под мета
+                            if (hit.overview) {
+                                if (info.find('.dlna-row__overview').length === 0) {
+                                    info.append('<div class="dlna-row__overview" style="font-size:0.78em; opacity:0.7; margin-top:0.3em; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;"></div>');
+                                }
+                                info.find('.dlna-row__overview').text(hit.overview);
+                            }
+                            // Сохраним для последующих этапов (history/full-card)
+                            entry.tmdb = hit;
+                        });
                     }
                     line.on('hover:enter', function () {
                         if (entry.isFolder) {
                             stack.push({ id: entry.id, title: entry.title });
                             self.openCurrent();
                         } else if (entry.url) {
-                            Lampa.Player.play({ title: entry.title, url: entry.url });
-                            Lampa.Player.playlist([{ title: entry.title, url: entry.url }]);
+                            var title = (entry.tmdb && entry.tmdb.title) || entry.title;
+                            Lampa.Player.play({ title: title, url: entry.url });
+                            Lampa.Player.playlist([{ title: title, url: entry.url }]);
                         } else {
                             Lampa.Noty.show('Нет URL для воспроизведения');
                         }
