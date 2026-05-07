@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.1.0';
+    var PLUGIN_VERSION = '0.1.1';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -150,14 +150,14 @@
                             Lampa.Noty.show('Нет URL для воспроизведения');
                         }
                     });
+                    line.on('hover:focus', function () { scroll.update(line); });
                     scroll.append(line);
                 });
 
-                Lampa.Controller.collectionSet(scroll.render());
-                Lampa.Controller.collectionFocus(false, scroll.render());
-
                 self.activity.loader(false);
                 self.activity.toggle();
+                // Пересобрать collection после добавления selectors и сразу выставить фокус
+                Lampa.Controller.toggle('content');
             }, function (err) {
                 scroll.clear();
                 scroll.append(pathRow);
@@ -171,10 +171,12 @@
         this.render = function () { return html; };
 
         this.start = function () {
+            if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
             Lampa.Controller.add('content', {
+                invisible: true,
                 toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(false, scroll.render());
+                    Lampa.Controller.collectionSet(html);
+                    Lampa.Controller.collectionFocus(false, html);
                 },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
                 down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
