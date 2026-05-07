@@ -19,9 +19,15 @@
         return (Lampa.Storage.field(STORAGE_DLNA_ADDR) || DEFAULT_DLNA_ADDR).replace(/^https?:\/\//, '').replace(/\/+$/, '');
     }
     function proxyBase() {
-        var p = Lampa.Storage.field(STORAGE_DLNA_PROXY) || '';
+        var p = (Lampa.Storage.field(STORAGE_DLNA_PROXY) || '').trim();
         if (!p) return '';
-        if (!/^https?:\/\//.test(p)) p = 'https://' + p;
+        if (!/^https?:\/\//.test(p)) {
+            // LAN-IP / localhost → http, остальное → https. Иначе локальный
+            // прокси на 192.168.x.x требовал бы вручную писать "http://".
+            var host = p.split('/')[0].split(':')[0];
+            var isLan = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.|localhost$)/.test(host);
+            p = (isLan ? 'http://' : 'https://') + p;
+        }
         return p.replace(/\/+$/, '') + '/';
     }
     function controlUrl() { return 'http://' + dlnaAddr() + '/ctl/ContentDir'; }
