@@ -13,13 +13,16 @@
     var STORAGE_DLNA_ADDR  = 'dlna_address';
     var STORAGE_DLNA_PROXY = 'dlna_proxy';
     var DEFAULT_DLNA_ADDR  = '192.168.1.1:8200';
+    // Совпадает с тем, что поднимает scripts/entware-install.sh — большинство
+    // пользователей идут этим путём, поэтому из коробки работает без настройки.
+    var DEFAULT_DLNA_PROXY = 'http://192.168.1.1:8780/proxy/';
     var SOAPNS = 'urn:schemas-upnp-org:service:ContentDirectory:1';
 
     function dlnaAddr() {
         return (Lampa.Storage.field(STORAGE_DLNA_ADDR) || DEFAULT_DLNA_ADDR).replace(/^https?:\/\//, '').replace(/\/+$/, '');
     }
     function proxyBase() {
-        var p = (Lampa.Storage.field(STORAGE_DLNA_PROXY) || '').trim();
+        var p = (Lampa.Storage.field(STORAGE_DLNA_PROXY) || DEFAULT_DLNA_PROXY).trim();
         if (!p) return '';
         if (!/^https?:\/\//.test(p)) {
             // LAN-IP / localhost → http, остальное → https. Иначе локальный
@@ -895,10 +898,10 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
-                param: { name: STORAGE_DLNA_PROXY, type: 'input', placeholder: 'https://your-tunnel.trycloudflare.com/proxy/', values: '', default: '' },
+                param: { name: STORAGE_DLNA_PROXY, type: 'input', placeholder: DEFAULT_DLNA_PROXY, values: '', default: DEFAULT_DLNA_PROXY },
                 field: {
                     name: 'Прокси URL',
-                    description: 'HTTPS-прокси для обхода CORS preflight и Private Network Access. Без него плагин не работает. См. README.'
+                    description: 'HTTP(S)-прокси для обхода CORS preflight. По дефолту — прокси из install.sh на самом Кинетике. См. README.'
                 }
             });
         }
