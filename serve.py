@@ -34,7 +34,8 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, SOAPAction, Authorization, X-Requested-With")
+        self.send_header("Access-Control-Expose-Headers", "*")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 

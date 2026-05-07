@@ -1,0 +1,27 @@
+{
+  "name": "mlp",
+  "version": "1.0.0",
+  "description": "Цель: получить рабочий DLNA-клиент в LAMPA на Samsung Neo QLED (Tizen 6+), который видит DLNA-сервер на Кинетике и играет видео в плеере LAMPA.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gudlayv/mlp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/gudlayv/mlp/issues"
+  },
+  "homepage": "https://github.com/gudlayv/mlp#readme",
+  "devDependencies": {
+    "playwright": "^1.59.1"
+  }
+}
