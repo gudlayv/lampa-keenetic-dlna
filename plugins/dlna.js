@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.6.1';
+    var PLUGIN_VERSION = '0.6.2';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -306,7 +306,7 @@
             series:  [{ kind: 'series',  title: 'Сериалы' }],
             folders: [{ id: '0',         title: 'Keenetic Ultra' }]
         };
-        var html, head, filterBtn, body, scroll, self = this;
+        var html, head, filter, filterItems, filterLabel, body, scroll, self = this;
 
         this.create = function () {
             html = $('<div class="dlna-keenetic"></div>');
@@ -316,10 +316,34 @@
             scroll.minus(head);
             body.append(scroll.render(true));
             html.append(head).append(body);
-            renderFilterButton();
+            initFilter();
             this.activity.loader(true);
             this.openCurrent();
         };
+
+        function initFilter() {
+            filter = new Lampa.Filter({});
+            filterItems = TABS.map(function (t) {
+                return { title: t.title, tabId: t.id, selected: t.id === currentTab };
+            });
+            filter.set('filter', filterItems);
+            filter.onSelect = function (type, item) {
+                if (type !== 'filter') return;
+                filterItems.forEach(function (i) { i.selected = i.tabId === item.tabId; });
+                switchTab(item.tabId);
+            };
+            filter.onBack = function () {
+                Lampa.Controller.toggle('dlna_head');
+            };
+            filter.toggle();
+            // Удаляем search-кнопку — у плагина нет поиска
+            filter.render().find('.filter--search').remove();
+        }
+
+        // Открыть Filter Select прямо (используется из right shortcut в любом месте)
+        function openFilter() {
+            if (filter && filter.show) filter.show('Фильтр', 'filter');
+        }
 
         function getStack() { return stacks[currentTab]; }
 
@@ -331,47 +355,22 @@
                 pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
                 head.append(pathRow);
             }
-            head.append(filterBtn);
+            // Filter — нативный LAMPA-компонент. Слева от него label с текущим выбором.
+            var headRow = $('<div class="dlna-keenetic__head-row"></div>');
+            filterLabel = $('<div class="dlna-keenetic__filter-value"></div>');
             updateFilterLabel();
-        }
-
-        function renderFilterButton() {
-            // Используем стандартные LAMPA-классы simple-button simple-button--filter,
-            // получаем нативный вид кнопки и стандартное focus-поведение.
-            filterBtn = $(
-                '<div class="simple-button simple-button--filter selector dlna-keenetic__filter">' +
-                  '<span class="dlna-keenetic__filter-value"></span>' +
-                '</div>'
-            );
-            filterBtn.on('hover:enter', openFilterSelect);
+            headRow.append(filter.render());
+            headRow.append(filterLabel);
+            head.append(headRow);
         }
 
         function updateFilterLabel() {
             var t = TABS.find(function (x) { return x.id === currentTab; });
-            filterBtn.find('.dlna-keenetic__filter-value').text('Фильтр: ' + (t ? t.title : ''));
-        }
-
-        function openFilterSelect() {
-            var items = TABS.map(function (t) {
-                return { title: t.title, tabId: t.id, selected: t.id === currentTab };
-            });
-            Lampa.Select.show({
-                title: 'Фильтр',
-                items: items,
-                onSelect: function (item) {
-                    switchTab(item.tabId);
-                },
-                onBack: function () {
-                    Lampa.Controller.toggle('dlna_head');
-                }
-            });
+            if (filterLabel) filterLabel.text(t ? t.title : '');
         }
 
         function switchTab(tabId) {
-            if (tabId === currentTab) {
-                Lampa.Controller.toggle('dlna_head');
-                return;
-            }
+            if (tabId === currentTab) return;
             currentTab = tabId;
             updateFilterLabel();
             self.openCurrent({ keepFocusOnHead: true });
@@ -714,17 +713,19 @@
         this.start = function () {
             if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
 
-            // Контроллер head: одна кнопка "Фильтр". Enter открывает Lampa.Select popup.
+            // Контроллер head: фокус на кнопке Filter из new Lampa.Filter()
             Lampa.Controller.add('dlna_head', {
                 invisible: true,
                 toggle: function () {
                     Lampa.Controller.collectionSet(head);
-                    Lampa.Controller.collectionFocus(filterBtn[0], head);
+                    var filterBtnEl = head.find('.filter--filter')[0];
+                    if (filterBtnEl) Lampa.Controller.collectionFocus(filterBtnEl, head);
+                    else Lampa.Controller.collectionFocus(false, head);
                 },
                 up:    function () { Lampa.Controller.toggle('head'); },
                 down:  function () { Lampa.Controller.toggle('content'); },
                 left:  function () { Lampa.Controller.toggle('menu'); },
-                right: function () { openFilterSelect(); },
+                right: function () { openFilter(); },
                 back:  function () { Lampa.Activity.backward(); }
             });
 
@@ -743,7 +744,8 @@
                 },
                 down:  function () { if (Navigator.canmove('down'))  Navigator.move('down'); },
                 left:  function () { if (Navigator.canmove('left'))  Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
-                right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
+                // → из любой строки списка открывает popup фильтров — глобальный шорткат
+                right: function () { openFilter(); },
                 back: function () {
                     var s = getStack();
                     if (s.length > 1) { s.pop(); self.openCurrent(); }
@@ -809,9 +811,9 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
-            // Filter button: используем стандартный LAMPA-класс .simple-button--filter,
-            // только окрашиваем value жёлтым.
-            '.dlna-keenetic__filter-value{color:#ffd966;}' +
+            // Filter row: native Lampa.Filter buttons + label с текущим выбором справа
+            '.dlna-keenetic__head-row{display:flex;align-items:center;gap:1em;flex-wrap:wrap;}' +
+            '.dlna-keenetic__filter-value{color:#ffd966;font-weight:600;font-size:1em;}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
