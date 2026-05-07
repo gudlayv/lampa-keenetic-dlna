@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.5';
+    var PLUGIN_VERSION = '0.6.0';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -300,14 +300,13 @@
 
     function Component() {
         var currentTab = 'all';
-        // Стек на каждую вкладку — позволяет сохранить позицию при переключении
         var stacks = {
             all:     [{ kind: 'all',     title: 'Все видео' }],
             movies:  [{ kind: 'movies',  title: 'Фильмы' }],
             series:  [{ kind: 'series',  title: 'Сериалы' }],
             folders: [{ id: '0',         title: 'Keenetic Ultra' }]
         };
-        var html, head, tabsRow, body, scroll, self = this;
+        var html, head, filterBtn, body, scroll, self = this;
 
         this.create = function () {
             html = $('<div class="dlna-keenetic"></div>');
@@ -317,7 +316,7 @@
             scroll.minus(head);
             body.append(scroll.render(true));
             html.append(head).append(body);
-            renderTabs();
+            renderFilterButton();
             this.activity.loader(true);
             this.openCurrent();
         };
@@ -326,41 +325,56 @@
 
         function setHead() {
             head.empty();
-            // Хлебные крошки только для вкладок где пользователь "погружён":
-            // Папки — DLNA-путь; Сериалы внутри сезона — путь сериала.
             var stack = getStack();
             if (stack.length > 1) {
                 var pathRow = $('<div class="dlna-keenetic__head-path"></div>');
                 pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
                 head.append(pathRow);
             }
-            head.append(tabsRow);
+            head.append(filterBtn);
+            updateFilterLabel();
         }
 
-        function renderTabs() {
-            tabsRow = $('<div class="dlna-keenetic__tabs"></div>');
-            TABS.forEach(function (t) {
-                var btn = $('<div class="selector dlna-keenetic__tab" data-tab="' + t.id + '">' + escapeHtml(t.title) + '</div>');
-                if (t.id === currentTab) btn.addClass('dlna-keenetic__tab--active');
-                btn.on('hover:enter', function () { switchTab(t.id); });
-                btn.on('hover:focus', function () { /* tabs всегда видны, scroll не нужен */ });
-                tabsRow.append(btn);
+        function renderFilterButton() {
+            filterBtn = $(
+                '<div class="selector dlna-keenetic__filter">' +
+                  '<span class="dlna-keenetic__filter-label">Фильтр</span>' +
+                  '<span class="dlna-keenetic__filter-value"></span>' +
+                  '<span class="dlna-keenetic__filter-caret">▾</span>' +
+                '</div>'
+            );
+            filterBtn.on('hover:enter', openFilterSelect);
+        }
+
+        function updateFilterLabel() {
+            var t = TABS.find(function (x) { return x.id === currentTab; });
+            filterBtn.find('.dlna-keenetic__filter-value').text(t ? t.title : '');
+        }
+
+        function openFilterSelect() {
+            var items = TABS.map(function (t) {
+                return { title: t.title, tabId: t.id, selected: t.id === currentTab };
+            });
+            Lampa.Select.show({
+                title: 'Фильтр',
+                items: items,
+                onSelect: function (item) {
+                    switchTab(item.tabId);
+                },
+                onBack: function () {
+                    Lampa.Controller.toggle('dlna_head');
+                }
             });
         }
 
         function switchTab(tabId) {
-            if (tabId === currentTab) return;
-            currentTab = tabId;
-            tabsRow.find('.dlna-keenetic__tab').removeClass('dlna-keenetic__tab--active');
-            tabsRow.find('[data-tab="' + tabId + '"]').addClass('dlna-keenetic__tab--active');
-            // Сразу перевешиваем фокус на новый active tab — не полагаемся на toggle handler
-            // (он no-op если controller уже активен, фокус оставался на прежнем tab).
-            var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
-            if (activeTab) {
-                Lampa.Controller.collectionSet(tabsRow);
-                Lampa.Controller.collectionFocus(activeTab, tabsRow);
+            if (tabId === currentTab) {
+                Lampa.Controller.toggle('dlna_head');
+                return;
             }
-            self.openCurrent({ keepFocusOnTab: true });
+            currentTab = tabId;
+            updateFilterLabel();
+            self.openCurrent({ keepFocusOnHead: true });
         }
 
         this.openCurrent = function (opts) {
@@ -460,13 +474,8 @@
 
             self.activity.loader(false);
             self.activity.toggle();
-            // Если переключаемся между вкладками — оставляем фокус на active tab.
-            // Делаем явный collectionSet/Focus, потому что activity.toggle()
-            // и render могут сбить focused element.
-            if (opts.keepFocusOnTab) {
-                Lampa.Controller.collectionSet(tabsRow);
-                var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
-                if (activeTab) Lampa.Controller.collectionFocus(activeTab, tabsRow);
+            if (opts.keepFocusOnHead) {
+                Lampa.Controller.toggle('dlna_head');
             } else {
                 Lampa.Controller.toggle('content');
             }
@@ -705,28 +714,17 @@
         this.start = function () {
             if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
 
-            // Контроллер tabs: левый/правый — между табами, down — в контент, up — в LAMPA-head.
-            // dlna_tabs: left/right переключают вкладку напрямую, без Navigator
-            // (Lampa Navigator плохо ходит между tabs во flex-row на Tizen).
-            function moveTab(delta) {
-                var idx = TABS.findIndex(function (t) { return t.id === currentTab; });
-                if (idx < 0) idx = 0;
-                var next = (idx + delta + TABS.length) % TABS.length;
-                if (TABS[next].id === currentTab) return;
-                switchTab(TABS[next].id);
-            }
-            Lampa.Controller.add('dlna_tabs', {
+            // Контроллер head: одна кнопка "Фильтр". Enter открывает Lampa.Select popup.
+            Lampa.Controller.add('dlna_head', {
                 invisible: true,
                 toggle: function () {
-                    Lampa.Controller.collectionSet(tabsRow);
-                    var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
-                    if (activeTab) Lampa.Controller.collectionFocus(activeTab, tabsRow);
-                    else Lampa.Controller.collectionFocus(false, tabsRow);
+                    Lampa.Controller.collectionSet(head);
+                    Lampa.Controller.collectionFocus(filterBtn[0], head);
                 },
-                left:  function () { moveTab(-1); },
-                right: function () { moveTab(1); },
                 up:    function () { Lampa.Controller.toggle('head'); },
                 down:  function () { Lampa.Controller.toggle('content'); },
+                left:  function () { Lampa.Controller.toggle('menu'); },
+                right: function () { /* пока ничего */ },
                 back:  function () { Lampa.Activity.backward(); }
             });
 
@@ -741,7 +739,7 @@
                 },
                 up: function () {
                     if (Navigator.canmove('up')) Navigator.move('up');
-                    else Lampa.Controller.toggle('dlna_tabs');
+                    else Lampa.Controller.toggle('dlna_head');
                 },
                 down:  function () { if (Navigator.canmove('down'))  Navigator.move('down'); },
                 left:  function () { if (Navigator.canmove('left'))  Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
@@ -773,14 +771,11 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
-            // Tabs: горизонтальный ряд
-            '.dlna-keenetic__tabs{display:flex;gap:0.4em;flex-wrap:wrap;}' +
-            '.dlna-keenetic__tab{padding:0.5em 1.1em;border-radius:0.4em;font-weight:600;cursor:pointer;background:transparent;opacity:0.6;}' +
-            // Active — текст ярче, без фона
-            '.dlna-keenetic__tab--active{opacity:1;color:#ffd966;}' +
-            // Focus — заметная белая обводка через box-shadow inset (без layout shift, без blur)
-            '.dlna-keenetic__tab.focus,' +
-            '.dlna-keenetic__tab.hover{background:rgba(255,255,255,0.18)!important;opacity:1;}' +
+            // Filter button: одна "кнопка-выпадушка" в head
+            '.dlna-keenetic__filter{display:inline-flex;align-items:center;gap:0.6em;padding:0.55em 1.1em;border-radius:0.4em;background:rgba(255,255,255,0.08);font-weight:600;}' +
+            '.dlna-keenetic__filter-label{opacity:0.6;}' +
+            '.dlna-keenetic__filter-value{color:#ffd966;}' +
+            '.dlna-keenetic__filter-caret{opacity:0.6;font-size:0.85em;}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
