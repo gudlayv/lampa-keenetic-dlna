@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.6.3';
+    var PLUGIN_VERSION = '0.6.4';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -332,9 +332,14 @@
                 filterItems.forEach(function (i) { i.selected = i.tabId === item.tabId; });
                 currentTab = item.tabId;
                 updateFilterBadge();
-                // Не трогаем activity.toggle и Controller.toggle — Lampa.Select после
-                // выбора возвращает control сам, а наш controller оставляем как есть.
                 reloadCurrent();
+                // Lampa.Select.hide() при выборе закрывает popup но не возвращает
+                // controller — фокус "висит" в скрытом select. Через setTimeout(0)
+                // отдадим управление обратно в наш head — после того как Select
+                // закончит свой hide-цикл.
+                setTimeout(function () {
+                    Lampa.Controller.toggle('dlna_head');
+                }, 0);
             };
             filter.onBack = function () {
                 Lampa.Controller.toggle('dlna_head');
