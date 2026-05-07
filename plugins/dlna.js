@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.2.0';
+    var PLUGIN_VERSION = '0.2.1';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -318,7 +318,10 @@
             '.dlna-keenetic .selector.hover{background:#fff!important;color:#000!important;transform:scale(1.015);}' +
             '.dlna-keenetic .selector.focus *,' +
             '.dlna-keenetic .selector.hover *{color:#000!important;}' +
-            '.dlna-keenetic .selector.focus::after{content:"";position:absolute;inset:-0.4em;border:0.25em solid #ffd966;border-radius:0.7em;pointer-events:none;}';
+            '.dlna-keenetic .selector.focus::after{content:"";position:absolute;inset:-0.4em;border:0.25em solid #ffd966;border-radius:0.7em;pointer-events:none;}' +
+            // Жестко ограничиваем SVG — иначе LAMPA-стили растягивают на 100%
+            '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
+            '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
         document.head.appendChild(style);
     }
 
