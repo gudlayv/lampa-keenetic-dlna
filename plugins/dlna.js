@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.4.0';
+    var PLUGIN_VERSION = '0.4.1';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -308,7 +308,10 @@
                 scroll.append(backBtn);
             }
 
-            var entries = groupEpisodes(rawEntries);
+            // Внутри виртуальной папки серии уже разобраны — повторная группировка
+            // снова свернет их в одну "Сезон 1 · 1 сер." → бесконечная вложенность.
+            var top = stack[stack.length - 1];
+            var entries = top.kind === 'episodes' ? rawEntries : groupEpisodes(rawEntries);
 
             if (!entries.length) {
                 scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
