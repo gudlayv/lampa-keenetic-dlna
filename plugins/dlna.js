@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.1.2';
+    var PLUGIN_VERSION = '0.1.3';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -17,6 +17,22 @@
             return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c];
         });
     }
+
+    var ICON_BACK =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.2em;margin-right:0.4em;">' +
+            '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>' +
+        '</svg>';
+
+    var ICON_FOLDER =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-0.3em;margin-right:0.5em;">' +
+            '<path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>' +
+        '</svg>';
+
+    var ICON_VIDEO =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.3em;margin-right:0.5em;">' +
+            '<polygon points="23 7 16 12 23 17 23 7"/>' +
+            '<rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>' +
+        '</svg>';
 
     function browse(objectId, success, error) {
         var soapBody =
@@ -119,8 +135,9 @@
                 scroll.append(pathRow);
 
                 if (stack.length > 1) {
-                    var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">⮜ Назад</div>');
+                    var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
                     backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
+                    backBtn.on('hover:focus', function () { scroll.update(backBtn); });
                     scroll.append(backBtn);
                 }
 
@@ -130,8 +147,8 @@
 
                 entries.forEach(function (entry) {
                     var line = $('<div class="selector" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
-                    var icon = entry.isFolder ? '📁' : '🎬';
-                    line.append('<div><b>' + icon + ' ' + escapeHtml(entry.title) + '</b></div>');
+                    var icon = entry.isFolder ? ICON_FOLDER : ICON_VIDEO;
+                    line.append('<div><b>' + icon + escapeHtml(entry.title) + '</b></div>');
                     var meta = [];
                     if (entry.resolution) meta.push(entry.resolution);
                     if (entry.duration) meta.push(entry.duration);
