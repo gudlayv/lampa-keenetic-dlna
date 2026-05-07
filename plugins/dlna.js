@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.4.2';
+    var PLUGIN_VERSION = '0.4.3';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -163,6 +163,20 @@
         return Lampa.TMDB.image('t/p/' + (size || 'w200') + posterPath);
     }
 
+    // Получить мету сезона: episodes с name, overview, still_path, vote_average
+    var tmdbSeasonCache = {};
+    function tmdbSeason(seriesId, seasonNumber, cb) {
+        var key = seriesId + ':s' + seasonNumber;
+        if (tmdbSeasonCache[key]) { cb(tmdbSeasonCache[key]); return; }
+        var url = Lampa.TMDB.api('tv/' + seriesId + '/season/' + seasonNumber + '?api_key=' + Lampa.TMDB.key() + '&language=ru');
+        var network = new Lampa.Reguest();
+        network.timeout(10000);
+        network.silent(url, function (data) {
+            tmdbSeasonCache[key] = data;
+            cb(data);
+        }, function () { cb(null); });
+    }
+
     // Стабильный хеш для DLNA-файла (по URL) — fallback когда нет TMDB hit
     function fileHash(url) {
         if (window.Lampa && Lampa.Utils && typeof Lampa.Utils.hash === 'function') {
@@ -281,9 +295,28 @@
             scroll.clear();
             scroll.append($('<div style="padding:1em 1.2em;">Загрузка ' + escapeHtml(top.title) + '…</div>'));
 
-            // Виртуальная группа эпизодов — рендерим из памяти, не ходим в DLNA
+            // Виртуальная группа эпизодов — рендерим из памяти, не ходим в DLNA.
+            // Если есть TMDB сериала — подгружаем мету сезона ОДНИМ запросом
+            // и обогащаем каждую серию: название, описание, still-картинка.
             if (top.kind === 'episodes') {
-                renderEntries(top.payload || []);
+                var payload = top.payload || [];
+                var seriesTmdb = payload[0] && payload[0]._series && payload[0]._series.tmdb;
+                if (seriesTmdb && seriesTmdb.id != null) {
+                    tmdbSeason(seriesTmdb.id, payload[0]._episode.season, function (seasonData) {
+                        if (seasonData && seasonData.episodes) {
+                            var byNum = {};
+                            seasonData.episodes.forEach(function (e) { byNum[e.episode_number] = e; });
+                            payload.forEach(function (entry) {
+                                if (entry._episode && byNum[entry._episode.episode]) {
+                                    entry._tmdbEpisode = byNum[entry._episode.episode];
+                                }
+                            });
+                        }
+                        renderEntries(payload);
+                    });
+                } else {
+                    renderEntries(payload);
+                }
                 return;
             }
 
@@ -399,39 +432,67 @@
         function renderVideoRow(entry, episode, _card) {
             // hash: для TMDB-фильма Utils.hash(original_title), для серии — с season+episode,
             // иначе — fallback по url. После TMDB-резолва пересчитаем.
-            var hash = fileHash(entry.url || entry.id || (Date.now() + '_' + Math.random()));
+            var seriesTmdb = entry._series && entry._series.tmdb;
+            var hash;
+            if (episode && seriesTmdb) {
+                hash = lampaHash(seriesTmdb, episode.season, episode.episode) || fileHash(entry.url || entry.id);
+            } else {
+                hash = fileHash(entry.url || entry.id || (Date.now() + '_' + Math.random()));
+            }
             entry._hash = hash;
 
             var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
 
+            // Для серий — широкий still (16:9), для фильмов — постер 2:3
+            var posterStyle = episode
+                ? 'flex:0 0 auto; width:8em; height:4.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;'
+                : 'flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;';
+
             var line = $('<div class="selector dlna-row dlna-row--video" data-hash="' + hash + '" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
-            var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;"></div>');
+            var poster = $('<div class="dlna-row__poster" style="' + posterStyle + '"></div>');
             poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
             if (savedTl && savedTl.percent >= 80) {
                 poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
             }
             line.append(poster);
 
-            var displayTitle = entry.title;
-            if (episode) {
-                displayTitle = 'Серия ' + episode.episode + ' · ' + entry.title;
-            }
-
+            // Для серий: если есть мета TMDB — используем её. Иначе — техническое имя.
             var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
-            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em; word-break:break-word;">' + escapeHtml(displayTitle) + '</div>');
+            if (episode) {
+                var ep = entry._tmdbEpisode;
+                var prefix = 'S' + episode.season.toString().padStart(2, '0') + 'E' + episode.episode.toString().padStart(2, '0');
+                var name = ep && ep.name ? ep.name : ('Серия ' + episode.episode);
+                info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em;"><span style="color:#7ed957; font-family:monospace; margin-right:0.5em;">' + prefix + '</span>' + escapeHtml(name) + '</div>');
+                if (ep && ep.still_path) {
+                    poster.css({
+                        'background-image': 'url("' + tmdbPosterUrl(ep.still_path, 'w300') + '")',
+                        'background-size': 'cover', 'background-position': 'center'
+                    });
+                    poster.empty();
+                    if (savedTl && savedTl.percent >= 80) {
+                        poster.append('<div style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+                    }
+                }
+                if (ep && ep.overview) {
+                    info.append('<div class="dlna-row__overview" style="font-size:0.78em; opacity:0.7; margin-top:0.2em; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">' + escapeHtml(ep.overview) + '</div>');
+                }
+            } else {
+                info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em; word-break:break-word;">' + escapeHtml(entry.title) + '</div>');
+            }
+            // Локальные метаданные (разрешение, длительность, размер) — мелким серым
             var localMeta = [];
             if (entry.resolution) localMeta.push(entry.resolution);
             if (entry.duration) localMeta.push(entry.duration);
             if (entry.size) localMeta.push(formatSize(entry.size));
             if (localMeta.length) {
-                info.append('<div class="dlna-row__local" style="font-size:0.78em; opacity:0.6; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
+                info.append('<div class="dlna-row__local" style="font-size:0.75em; opacity:0.5; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
             }
-            // TMDB-блок только для одиночных фильмов; для серий — мета сериала уже на родительской карточке
+            // TMDB-блок только для одиночных фильмов
             if (!episode) {
                 info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
             }
             if (savedTl && savedTl.percent > 0) {
-                var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
+                var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:#7ed957; width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
                 info.append(bar);
             }
             line.append(info);
