@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '0.5.0';
+    var PLUGIN_VERSION = '0.5.1';
     var REPORT_ENDPOINT_KEY = 'tizen_debug_report_url';
-    var REPORT_ENDPOINT_DEFAULT = 'http://192.168.1.129:8080/report';
+    var REPORT_ENDPOINT_DEFAULT = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/report';
 
     function reportEndpoint() {
         try {
