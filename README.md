@@ -85,11 +85,16 @@ curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scr
 В LAMPA на TV: **Расширения → Добавить URL**
 
 ```
-https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/plugins/dlna.js
+https://cdn.jsdelivr.net/gh/gudlayv/lampa-keenetic-dlna@main/plugins/dlna.js
 ```
 
-> `cub.red` подгружает плагины через свой кеш. Если правишь код, добавляй
-> querystring (`?v=2`) чтобы не подхватился старый.
+> Используем jsdelivr-CDN потому что `raw.githubusercontent.com` отдаёт
+> `Content-Type: text/plain` + `nosniff`, и браузер LAMPA отказывается
+> выполнять такой ответ как JavaScript. jsdelivr отдаёт правильный
+> `application/javascript`.
+>
+> jsdelivr кеширует. Если правишь код, добавляй querystring (`?v=2`) или
+> используй commit-hash в URL (`@<sha>`) чтобы подхватить свежую версию.
 
 ### 4. Настройка плагина
 
