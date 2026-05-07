@@ -61,6 +61,31 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps({"saved": str(path.name)}).encode())
 
     def do_GET(self):
+        if self.path.startswith("/ping"):
+            print(f"[ping] from {self.client_address[0]}")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"pong")
+            return
+        if self.path.startswith("/report-img"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            data_raw = qs.get("d", [""])[0]
+            try:
+                data = json.loads(data_raw)
+            except Exception:
+                data = {"raw": data_raw}
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = REPORTS_DIR / f"{ts}-img.json"
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[report-img] saved {path.relative_to(ROOT)}")
+            # 1x1 transparent gif
+            self.send_response(200)
+            self.send_header("Content-Type", "image/gif")
+            self.end_headers()
+            self.wfile.write(bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"))
+            return
         if self.path == "/reports":
             files = sorted(p.name for p in REPORTS_DIR.glob("*.json"))
             self.send_response(200)

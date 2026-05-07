@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '0.1.0';
+    var PLUGIN_VERSION = '0.5.0';
     var REPORT_ENDPOINT_KEY = 'tizen_debug_report_url';
     var REPORT_ENDPOINT_DEFAULT = 'http://192.168.1.129:8080/report';
 
@@ -41,27 +41,17 @@
 
     var QUICK_CHECKS = [
         'webapis',
-        'webapis.allshare',
-        'webapis.allshare.serviceconnector',
-        'webapis.network',
-        'webapis.avplay',
-        'webapis.avinfo',
-        'webapis.productinfo',
-        'webapis.tvinfo',
-        'webapis.tvchannel',
-        'webapis.tvinputdevice',
-        'webapis.appcommon',
-        'webapis.preview',
         'tizen',
+        'webapis.allshare',
+        'webapis.network',
+        'webapis.productinfo',
         'tizen.systeminfo',
         'tizen.network',
-        'tizen.application',
         'tizen.filesystem',
-        'tizen.tvchannel',
-        'tizen.tvinputdevice',
-        'tizen.tvwindow',
-        'tizen.power',
-        'tizen.SocketAddress'
+        'tizen.application',
+        'tizen.SocketAddress',
+        'tizen.UDPSocket',
+        'tizen.TCPSocket'
     ];
 
     var TIZEN_CAPABILITIES = [
@@ -163,17 +153,56 @@
 
     function sendReport(report, cb) {
         var url = reportEndpoint();
+        var body = JSON.stringify(report);
+
+        // 1. sendBeacon — менее подвержен CORS preflight
         try {
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', url);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.onload = function () { cb(null, xhr.status); };
-            xhr.onerror = function () { cb(new Error('network error'), 0); };
-            xhr.ontimeout = function () { cb(new Error('timeout'), 0); };
-            xhr.timeout = 10000;
-            xhr.send(JSON.stringify(report));
-        } catch (e) {
-            cb(e, 0);
+            if (navigator.sendBeacon) {
+                var blob = new Blob([body], { type: 'text/plain' });
+                if (navigator.sendBeacon(url, blob)) {
+                    cb(null, 'beacon-ok');
+                    return;
+                }
+            }
+        } catch (e) {}
+
+        // 2. fetch с text/plain — simple request, без preflight
+        try {
+            if (window.fetch) {
+                fetch(url, {
+                    method: 'POST',
+                    body: body,
+                    headers: { 'Content-Type': 'text/plain' },
+                    mode: 'cors'
+                }).then(function (r) { cb(null, 'fetch ' + r.status); })
+                  .catch(function (e) { fallbackImg(); });
+                return;
+            }
+        } catch (e) {}
+
+        // 3. fallback: <img> ping с минимальным summary в querystring
+        fallbackImg();
+
+        function fallbackImg() {
+            try {
+                var summary = {
+                    ts: report.ts,
+                    ua: (report.ua || '').slice(0, 100),
+                    href: report.href,
+                    lampa: report.lampa,
+                    qc: {}
+                };
+                Object.keys(report.quickChecks || {}).forEach(function (k) {
+                    summary.qc[k] = report.quickChecks[k].ok ? 1 : 0;
+                });
+                var qs = encodeURIComponent(JSON.stringify(summary)).slice(0, 6000);
+                var img = new Image();
+                img.onload = function () { cb(null, 'img-ping'); };
+                img.onerror = function () { cb(new Error('all transports failed'), 0); };
+                img.src = url.replace(/\/report$/, '/report-img') + '?d=' + qs + '&_=' + Date.now();
+            } catch (e) {
+                cb(e, 0);
+            }
         }
     }
 
@@ -195,82 +224,152 @@
                 report = buildReport();
                 console.log('[tizen-debug] report:', report);
 
-                var view = $('<div style="padding:1.5em; font-size:1em; line-height:1.4;"></div>');
-                view.append('<h2 style="margin-bottom:1em;">Tizen Debug v' + PLUGIN_VERSION + '</h2>');
+                var model = (report.systeminfo && report.systeminfo['http://tizen.org/system/model_name']) || '?';
+                var fwBuild = (report.systeminfo && report.systeminfo['http://tizen.org/system/build.string']) || '?';
+                var tzVer = (report.systeminfo && report.systeminfo['http://tizen.org/feature/platform.version']) || '?';
+                var hasUpnp = report.systeminfo && report.systeminfo['http://tizen.org/feature/network.upnp'];
+                var hasDlna = report.systeminfo && report.systeminfo['http://tizen.org/feature/network.dlna'];
 
-                var summary = $('<div style="margin-bottom:1em; font-size:0.9em; opacity:0.8;"></div>');
-                summary.append('<div><b>UA:</b> ' + escapeHtml(report.ua) + '</div>');
-                summary.append('<div><b>Time:</b> ' + report.ts + '</div>');
-                summary.append('<div><b>Lampa platform:</b> ' + escapeHtml(JSON.stringify(report.lampa)) + '</div>');
-                view.append(summary);
+                var view = $('<div style="padding:1em 1.5em; font-size:0.9em; line-height:1.35;"></div>');
 
-                var btnRow = $('<div style="margin:1em 0;"></div>');
+                var hdr = $('<div style="margin-bottom:0.8em; padding:0.6em 0.8em; background:rgba(58,115,255,0.18); border-left:4px solid #3a73ff; border-radius:0.3em;"></div>');
+                hdr.append('<div style="font-size:1.4em; font-weight:bold;">' + escapeHtml(model) + ' · Tizen ' + escapeHtml(tzVer) + '</div>');
+                hdr.append('<div style="font-size:0.85em; opacity:0.8;">build: ' + escapeHtml(fwBuild) + '</div>');
+                hdr.append('<div style="font-size:0.85em; opacity:0.8;">network.upnp=' + escapeHtml(String(hasUpnp)) + ' · network.dlna=' + escapeHtml(String(hasDlna)) + '</div>');
+                view.append(hdr);
 
-                var btnSend = $('<div class="selector" style="display:inline-block; padding:0.7em 1.2em; margin-right:0.7em; background:#3a73ff; border-radius:0.4em;">Отправить отчет</div>');
-                btnSend.on('hover:enter', function () {
-                    Lampa.Noty.show('Отправляю отчет на ' + reportEndpoint());
-                    sendReport(report, function (err, status) {
-                        if (err) Lampa.Noty.show('Ошибка: ' + err.message);
-                        else Lampa.Noty.show('Отправлено: HTTP ' + status);
-                    });
-                });
-                btnRow.append(btnSend);
-
-                var btnLog = $('<div class="selector" style="display:inline-block; padding:0.7em 1.2em; margin-right:0.7em; background:#444; border-radius:0.4em;">Console.log</div>');
-                btnLog.on('hover:enter', function () {
-                    console.log('[tizen-debug] full report:', report);
-                    Lampa.Noty.show('Отчет в консоли (Web Inspector)');
-                });
-                btnRow.append(btnLog);
-
-                var btnRefresh = $('<div class="selector" style="display:inline-block; padding:0.7em 1.2em; background:#444; border-radius:0.4em;">Пересобрать</div>');
+                var btnRefresh = $('<div class="selector" style="display:inline-block; padding:0.5em 1em; background:#444; border-radius:0.3em; margin-bottom:0.6em;">Пересобрать</div>');
                 btnRefresh.on('hover:enter', function () {
-                    Lampa.Activity.replace({
-                        url: '', title: 'Tizen Debug', component: 'tizen_debug', page: 1
-                    });
+                    Lampa.Activity.replace({ url: '', title: 'Tizen Debug', component: 'tizen_debug', page: 1 });
                 });
-                btnRow.append(btnRefresh);
+                view.append(btnRefresh);
 
-                view.append(btnRow);
+                view.append('<div style="font-size:0.75em; opacity:0.6; margin-bottom:0.6em; word-break:break-all;">' + escapeHtml(report.href) + '</div>');
 
-                view.append('<h3 style="margin-top:1.2em; margin-bottom:0.5em;">Quick checks</h3>');
+                view.append('<h3 style="margin:0.6em 0 0.3em 0; color:#ffd966;">Quick checks</h3>');
                 Object.keys(report.quickChecks).forEach(function (path) {
                     var qc = report.quickChecks[path];
                     var color = qc.ok ? '#7ed957' : '#ff6464';
-                    var line = $('<div class="selector" style="padding:0.4em 0.8em; margin-bottom:0.2em; border-left:3px solid ' + color + '; background:rgba(255,255,255,0.04);"></div>');
-                    line.append('<b>' + escapeHtml(path) + '</b>: ' + escapeHtml(qc.summary));
+                    var mark = qc.ok ? '✓' : '✗';
+                    var line = $('<div style="padding:0.25em 0.6em; margin-bottom:0.15em; border-left:3px solid ' + color + '; background:rgba(255,255,255,0.04); font-size:0.95em;"></div>');
+                    line.append('<span style="color:' + color + '; font-weight:bold;">' + mark + '</span> <b>' + escapeHtml(path) + '</b>: ' + escapeHtml(qc.summary));
                     if (qc.keys && qc.keys.length) {
-                        line.append('<div style="font-size:0.8em; opacity:0.7; margin-top:0.2em;">' + escapeHtml(qc.keys.join(', ')) + '</div>');
+                        line.append('<div style="font-size:0.8em; opacity:0.75; margin-top:0.1em; padding-left:1.2em;">' + escapeHtml(qc.keys.join(', ')) + '</div>');
                     }
                     view.append(line);
                 });
 
-                view.append('<h3 style="margin-top:1.2em; margin-bottom:0.5em;">tizen.systeminfo capabilities</h3>');
-                var siBlock = $('<div class="selector" style="padding:0.7em; background:rgba(255,255,255,0.04); white-space:pre-wrap; font-size:0.8em;"></div>');
-                siBlock.text(JSON.stringify(report.systeminfo, null, 2));
-                view.append(siBlock);
+                // Плоский список верхнеуровневых ключей tizen.* и webapis.* с типами
+                view.append('<h3 style="margin:0.8em 0 0.3em 0; color:#ffd966;">tizen.* keys</h3>');
+                view.append(flatKeyList(window.tizen));
 
-                view.append('<h3 style="margin-top:1.2em; margin-bottom:0.5em;">webapis.productinfo</h3>');
-                var piBlock = $('<div class="selector" style="padding:0.7em; background:rgba(255,255,255,0.04); white-space:pre-wrap; font-size:0.8em;"></div>');
-                piBlock.text(JSON.stringify(report.productinfo, null, 2));
+                view.append('<h3 style="margin:0.8em 0 0.3em 0; color:#ffd966;">webapis.* keys</h3>');
+                view.append(flatKeyList(window.webapis));
+
+                view.append('<h3 style="margin:0.8em 0 0.3em 0; color:#ffd966;">productinfo</h3>');
+                var piBlock = $('<div style="padding:0.5em 0.7em; background:rgba(255,255,255,0.04); white-space:pre-wrap; font-size:0.8em; word-break:break-all;"></div>');
+                piBlock.text(JSON.stringify(report.productinfo, null, 1));
                 view.append(piBlock);
 
-                view.append('<h3 style="margin-top:1.2em; margin-bottom:0.5em;">tizen (depth 3)</h3>');
-                var tzBlock = $('<div class="selector" style="padding:0.7em; background:rgba(255,255,255,0.04); white-space:pre-wrap; font-size:0.75em; max-height:30em; overflow:hidden;"></div>');
-                tzBlock.text(JSON.stringify(report.tizen, null, 2));
-                view.append(tzBlock);
-
-                view.append('<h3 style="margin-top:1.2em; margin-bottom:0.5em;">webapis (depth 3)</h3>');
-                var waBlock = $('<div class="selector" style="padding:0.7em; background:rgba(255,255,255,0.04); white-space:pre-wrap; font-size:0.75em; max-height:30em; overflow:hidden;"></div>');
-                waBlock.text(JSON.stringify(report.webapis, null, 2));
-                view.append(waBlock);
-
-                this.activity.loader(false);
-                this.activity.toggle();
+                view.append('<h3 style="margin:0.8em 0 0.3em 0; color:#ffd966;">Transport tests (LAN HTTP)</h3>');
+                var transportsBox = $('<div></div>');
+                view.append(transportsBox);
+                runTransportTests(transportsBox);
 
                 scroll.append(view);
                 html.append(scroll.render());
+
+                this.activity.loader(false);
+                this.activity.toggle();
             };
+
+            function runTransportTests(container) {
+                var base = (function () {
+                    var url = reportEndpoint();
+                    return url.replace(/\/report$/, '');
+                })();
+                var pingUrl = base + '/ping';
+
+                var tests = [
+                    { name: 'fetch GET', run: function (cb) {
+                        if (!window.fetch) return cb('NO fetch');
+                        fetch(pingUrl).then(function (r) { return r.text().then(function (t) { cb('HTTP ' + r.status + ' · ' + t.slice(0, 80)); }); })
+                                      .catch(function (e) { cb('ERR ' + e.message); });
+                    }},
+                    { name: 'XMLHttpRequest GET', run: function (cb) {
+                        try {
+                            var x = new XMLHttpRequest();
+                            x.open('GET', pingUrl);
+                            x.onload = function () { cb('HTTP ' + x.status + ' · ' + (x.responseText || '').slice(0, 80)); };
+                            x.onerror = function () { cb('ERR network'); };
+                            x.ontimeout = function () { cb('ERR timeout'); };
+                            x.timeout = 5000;
+                            x.send();
+                        } catch (e) { cb('ERR ' + e.message); }
+                    }},
+                    { name: 'Lampa.Reguest.silent', run: function (cb) {
+                        try {
+                            if (!Lampa.Reguest) return cb('NO Lampa.Reguest');
+                            var r = new Lampa.Reguest();
+                            if (typeof r.silent === 'function') {
+                                r.silent(pingUrl, function (resp) { cb('OK · ' + String(resp).slice(0, 80)); },
+                                                  function (err) { cb('ERR ' + JSON.stringify(err).slice(0, 80)); });
+                            } else if (typeof r.native === 'function') {
+                                r.native(pingUrl, function (resp) { cb('OK · ' + String(resp).slice(0, 80)); },
+                                                  function (err) { cb('ERR ' + JSON.stringify(err).slice(0, 80)); });
+                            } else {
+                                cb('NO silent/native methods');
+                            }
+                        } catch (e) { cb('ERR ' + e.message); }
+                    }},
+                    { name: '<img> ping', run: function (cb) {
+                        try {
+                            var img = new Image();
+                            var done = false;
+                            img.onload = function () { if (!done) { done = true; cb('OK loaded'); } };
+                            img.onerror = function () { if (!done) { done = true; cb('ERR onerror'); } };
+                            setTimeout(function () { if (!done) { done = true; cb('ERR timeout'); } }, 5000);
+                            img.src = pingUrl + '?_=' + Date.now();
+                        } catch (e) { cb('ERR ' + e.message); }
+                    }}
+                ];
+
+                tests.forEach(function (t) {
+                    var line = $('<div style="padding:0.3em 0.6em; margin-bottom:0.15em; background:rgba(255,255,255,0.04); border-left:3px solid #888;"></div>');
+                    line.append('<b>' + escapeHtml(t.name) + '</b>: <span class="result" style="color:#ffd966;">running…</span>');
+                    container.append(line);
+                    t.run(function (result) {
+                        var ok = result.indexOf('HTTP 200') === 0 || result.indexOf('OK') === 0;
+                        line.css('border-left-color', ok ? '#7ed957' : '#ff6464');
+                        line.find('.result').css('color', ok ? '#7ed957' : '#ff6464').text(result);
+                    });
+                });
+            }
+
+            function flatKeyList(root) {
+                var box = $('<div style="font-size:0.85em; line-height:1.3;"></div>');
+                if (!root) {
+                    box.append('<div style="color:#ff6464;">undefined</div>');
+                    return box;
+                }
+                var keys = [];
+                try { keys = Object.getOwnPropertyNames(root); } catch (e) {}
+                try { for (var k in root) if (keys.indexOf(k) < 0) keys.push(k); } catch (e) {}
+                keys.sort();
+                keys.forEach(function (k) {
+                    var v;
+                    try { v = root[k]; } catch (e) { v = '<error>'; }
+                    var t = (v === null) ? 'null' : typeof v;
+                    var sub = '';
+                    if (t === 'object' && v) {
+                        var subKeys = [];
+                        try { subKeys = Object.getOwnPropertyNames(v); } catch (e) {}
+                        if (subKeys.length) sub = ' { ' + subKeys.slice(0, 30).join(', ') + (subKeys.length > 30 ? ', …' : '') + ' }';
+                    }
+                    box.append('<div><span style="color:#9bc;">' + escapeHtml(k) + '</span> <span style="opacity:0.6;">' + escapeHtml(t) + '</span><span style="font-size:0.8em; opacity:0.7;">' + escapeHtml(sub) + '</span></div>');
+                });
+                return box;
+            }
 
             this.render = function () { return html; };
 
