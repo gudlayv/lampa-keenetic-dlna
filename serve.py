@@ -19,6 +19,8 @@ URL для подключения в LAMPA (заменить IP на твой):
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,9 +42,51 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def proxy_forward(self, method):
+        """Префиксный прокси: /proxy/http://target/path → форвардит на target."""
+        target = self.path[len("/proxy/"):]
+        if not target.startswith("http://") and not target.startswith("https://"):
+            self.send_error(400, "proxy target must be absolute http(s) URL")
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        # Передаем заголовки запроса дальше (кроме hop-by-hop и Host)
+        skip = {"host", "connection", "content-length", "origin", "referer"}
+        forward_headers = {}
+        for k, v in self.headers.items():
+            if k.lower() in skip:
+                continue
+            forward_headers[k] = v
+        req = urllib.request.Request(target, data=body, method=method, headers=forward_headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                status = resp.status
+                resp_body = resp.read()
+                resp_headers = dict(resp.headers.items())
+        except urllib.error.HTTPError as e:
+            status = e.code
+            resp_body = e.read() if e.fp else b""
+            resp_headers = dict(e.headers.items()) if e.headers else {}
+        except Exception as e:
+            self.send_error(502, f"upstream error: {e}")
+            return
+        print(f"[proxy] {method} {target} -> {status} ({len(resp_body)} bytes)")
+        self.send_response(status)
+        for k, v in resp_headers.items():
+            if k.lower() in {"transfer-encoding", "connection", "content-length"}:
+                continue
+            self.send_header(k, v)
+        # CORS уже добавляются в end_headers
+        self.send_header("Content-Length", str(len(resp_body)))
+        self.end_headers()
+        self.wfile.write(resp_body)
+
     def do_POST(self):
+        if self.path.startswith("/proxy/"):
+            self.proxy_forward("POST")
+            return
         if self.path.rstrip("/") != "/report":
-            self.send_error(404, "POST only on /report")
+            self.send_error(404, "POST only on /report or /proxy/<url>")
             return
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
@@ -61,6 +105,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps({"saved": str(path.name)}).encode())
 
     def do_GET(self):
+        if self.path.startswith("/proxy/"):
+            self.proxy_forward("GET")
+            return
         if self.path.startswith("/ping"):
             print(f"[ping] from {self.client_address[0]}")
             self.send_response(200)
