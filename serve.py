@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""
+Dev-сервер для отладки LAMPA-плагинов в локальной сети.
+
+Что делает:
+- GET /...           — отдает файлы из текущей директории (плагины и т.п.)
+- POST /report       — принимает JSON-отчет от плагина и сохраняет в reports/<ts>.json
+- GET  /reports      — JSON-список сохраненных отчетов
+- GET  /reports/last — последний отчет
+
+Запуск:
+    python3 serve.py [port]
+По умолчанию порт 8080. Слушает на всех интерфейсах (0.0.0.0).
+
+URL для подключения в LAMPA (заменить IP на твой):
+    http://192.168.1.129:8080/plugins/tizen-debug.js
+"""
+
+import json
+import os
+import sys
+from datetime import datetime
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+REPORTS_DIR = ROOT / "reports"
+REPORTS_DIR.mkdir(exist_ok=True)
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/report":
+            self.send_error(404, "POST only on /report")
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        try:
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception as exc:
+            self.send_error(400, f"bad json: {exc}")
+            return
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = REPORTS_DIR / f"{ts}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[report] saved {path.relative_to(ROOT)} ({length} bytes)")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"saved": str(path.name)}).encode())
+
+    def do_GET(self):
+        if self.path == "/reports":
+            files = sorted(p.name for p in REPORTS_DIR.glob("*.json"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(files).encode())
+            return
+        if self.path == "/reports/last":
+            files = sorted(REPORTS_DIR.glob("*.json"))
+            if not files:
+                self.send_error(404, "no reports yet")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(files[-1].read_bytes())
+            return
+        super().do_GET()
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    os.chdir(ROOT)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"serving {ROOT} on http://0.0.0.0:{port}")
+    print(f"plugin url:   http://<твой-ip>:{port}/plugins/tizen-debug.js")
+    print(f"reports dir:  {REPORTS_DIR}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nbye")
+
+
+if __name__ == "__main__":
+    main()
