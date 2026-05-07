@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.0';
+    var PLUGIN_VERSION = '0.5.1';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -353,10 +353,11 @@
             currentTab = tabId;
             tabsRow.find('.dlna-keenetic__tab').removeClass('dlna-keenetic__tab--active');
             tabsRow.find('[data-tab="' + tabId + '"]').addClass('dlna-keenetic__tab--active');
-            self.openCurrent();
+            self.openCurrent({ keepFocusOnTab: true });
         }
 
-        this.openCurrent = function () {
+        this.openCurrent = function (opts) {
+            opts = opts || {};
             var stack = getStack();
             var top = stack[stack.length - 1];
             setHead();
@@ -376,17 +377,17 @@
                                 if (entry._episode && byNum[entry._episode.episode]) entry._tmdbEpisode = byNum[entry._episode.episode];
                             });
                         }
-                        renderEntries(payload);
+                        renderEntries(payload, opts);
                     });
                 } else {
-                    renderEntries(payload);
+                    renderEntries(payload, opts);
                 }
                 return;
             }
 
             // "Папки" — Browse по DLNA-id из стека
             if (currentTab === 'folders') {
-                browse(top.id, renderEntries, browseError);
+                browse(top.id, function (entries) { renderEntries(entries, opts); }, browseError);
                 return;
             }
 
@@ -399,20 +400,16 @@
                     return;
                 }
                 browse(allVideoId, function (entries) {
-                    // Сортируем по dc:date desc (новые сверху)
                     entries.sort(function (a, b) {
                         var da = a.date || '', db = b.date || '';
                         return db.localeCompare(da);
                     });
                     if (currentTab === 'movies') {
                         entries = entries.filter(function (e) { return !e.isFolder && !parseEpisode(e.title); });
-                        renderEntries(entries, /*skipGrouping*/ true);
                     } else if (currentTab === 'series') {
                         entries = entries.filter(function (e) { return !e.isFolder && parseEpisode(e.title); });
-                        renderEntries(entries); // groupEpisodes свернёт в виртуальные папки сезонов
-                    } else { // 'all'
-                        renderEntries(entries);
                     }
+                    renderEntries(entries, opts);
                 }, browseError);
             });
         };
@@ -425,7 +422,8 @@
             self.activity.loader(false);
         }
 
-        function renderEntries(rawEntries) {
+        function renderEntries(rawEntries, opts) {
+            opts = opts || {};
             scroll.clear();
 
             var stack = getStack();
@@ -455,7 +453,13 @@
 
             self.activity.loader(false);
             self.activity.toggle();
-            Lampa.Controller.toggle('content');
+            // Если переключаемся между вкладками — оставляем фокус в tabs-controller'е.
+            // Это сохраняет фокус на active tab, не сбрасывая на первый .selector списка.
+            if (opts.keepFocusOnTab) {
+                Lampa.Controller.toggle('dlna_tabs');
+            } else {
+                Lampa.Controller.toggle('content');
+            }
         }
 
         function renderEntryRow(entry) {
@@ -690,15 +694,35 @@
 
         this.start = function () {
             if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
+
+            // Контроллер tabs: левый/правый — между табами, down — в контент, up — в LAMPA-head.
+            Lampa.Controller.add('dlna_tabs', {
+                invisible: true,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(tabsRow);
+                    var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
+                    if (activeTab) Lampa.Controller.collectionFocus(activeTab, tabsRow);
+                    else Lampa.Controller.collectionFocus(false, tabsRow);
+                },
+                left:  function () { if (Navigator.canmove('left'))  Navigator.move('left');  else Lampa.Controller.toggle('menu'); },
+                right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
+                up:    function () { Lampa.Controller.toggle('head'); },
+                down:  function () { Lampa.Controller.toggle('content'); },
+                back:  function () { Lampa.Activity.backward(); }
+            });
+
             Lampa.Controller.add('content', {
                 invisible: true,
                 toggle: function () {
                     Lampa.Controller.collectionSet(html);
                     Lampa.Controller.collectionFocus(false, html);
                 },
-                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
-                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
-                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else Lampa.Controller.toggle('dlna_tabs');
+                },
+                down:  function () { if (Navigator.canmove('down'))  Navigator.move('down'); },
+                left:  function () { if (Navigator.canmove('left'))  Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
                 back: function () {
                     var s = getStack();
