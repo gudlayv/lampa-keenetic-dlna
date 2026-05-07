@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.4';
+    var PLUGIN_VERSION = '0.5.5';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -460,9 +460,14 @@
 
             self.activity.loader(false);
             self.activity.toggle();
-            // Если переключаемся между вкладками — фокус уже стоит на active tab
-            // (поставлен в switchTab), ничего не трогаем.
-            if (!opts.keepFocusOnTab) {
+            // Если переключаемся между вкладками — оставляем фокус на active tab.
+            // Делаем явный collectionSet/Focus, потому что activity.toggle()
+            // и render могут сбить focused element.
+            if (opts.keepFocusOnTab) {
+                Lampa.Controller.collectionSet(tabsRow);
+                var activeTab = tabsRow.find('.dlna-keenetic__tab--active')[0];
+                if (activeTab) Lampa.Controller.collectionFocus(activeTab, tabsRow);
+            } else {
                 Lampa.Controller.toggle('content');
             }
         }
