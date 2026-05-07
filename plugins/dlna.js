@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.6.2';
+    var PLUGIN_VERSION = '0.6.3';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -306,7 +306,7 @@
             series:  [{ kind: 'series',  title: 'Сериалы' }],
             folders: [{ id: '0',         title: 'Keenetic Ultra' }]
         };
-        var html, head, filter, filterItems, filterLabel, body, scroll, self = this;
+        var html, head, filter, filterItems, body, scroll, self = this;
 
         this.create = function () {
             html = $('<div class="dlna-keenetic"></div>');
@@ -330,7 +330,11 @@
             filter.onSelect = function (type, item) {
                 if (type !== 'filter') return;
                 filterItems.forEach(function (i) { i.selected = i.tabId === item.tabId; });
-                switchTab(item.tabId);
+                currentTab = item.tabId;
+                updateFilterBadge();
+                // Не трогаем activity.toggle и Controller.toggle — Lampa.Select после
+                // выбора возвращает control сам, а наш controller оставляем как есть.
+                reloadCurrent();
             };
             filter.onBack = function () {
                 Lampa.Controller.toggle('dlna_head');
@@ -338,6 +342,12 @@
             filter.toggle();
             // Удаляем search-кнопку — у плагина нет поиска
             filter.render().find('.filter--search').remove();
+            updateFilterBadge();
+        }
+
+        function updateFilterBadge() {
+            var t = TABS.find(function (x) { return x.id === currentTab; });
+            if (filter && filter.chosen) filter.chosen('filter', t ? [t.title] : []);
         }
 
         // Открыть Filter Select прямо (используется из right shortcut в любом месте)
@@ -355,25 +365,13 @@
                 pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
                 head.append(pathRow);
             }
-            // Filter — нативный LAMPA-компонент. Слева от него label с текущим выбором.
-            var headRow = $('<div class="dlna-keenetic__head-row"></div>');
-            filterLabel = $('<div class="dlna-keenetic__filter-value"></div>');
-            updateFilterLabel();
-            headRow.append(filter.render());
-            headRow.append(filterLabel);
-            head.append(headRow);
+            head.append(filter.render());
         }
 
-        function updateFilterLabel() {
-            var t = TABS.find(function (x) { return x.id === currentTab; });
-            if (filterLabel) filterLabel.text(t ? t.title : '');
-        }
-
-        function switchTab(tabId) {
-            if (tabId === currentTab) return;
-            currentTab = tabId;
-            updateFilterLabel();
-            self.openCurrent({ keepFocusOnHead: true });
+        // Перезагрузить текущую вкладку без перетоггливания controllers
+        // (вызывается из filter.onSelect — Lampa.Select сам управляет фокусом)
+        function reloadCurrent() {
+            self.openCurrent({ skipControllerToggle: true });
         }
 
         this.openCurrent = function (opts) {
@@ -472,10 +470,8 @@
             });
 
             self.activity.loader(false);
-            self.activity.toggle();
-            if (opts.keepFocusOnHead) {
-                Lampa.Controller.toggle('dlna_head');
-            } else {
+            if (!opts.skipControllerToggle) {
+                self.activity.toggle();
                 Lampa.Controller.toggle('content');
             }
         }
@@ -811,9 +807,6 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
-            // Filter row: native Lampa.Filter buttons + label с текущим выбором справа
-            '.dlna-keenetic__head-row{display:flex;align-items:center;gap:1em;flex-wrap:wrap;}' +
-            '.dlna-keenetic__filter-value{color:#ffd966;font-weight:600;font-size:1em;}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
