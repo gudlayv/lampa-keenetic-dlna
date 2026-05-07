@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.5.3';
+    var PLUGIN_VERSION = '0.5.4';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -728,8 +728,11 @@
             Lampa.Controller.add('content', {
                 invisible: true,
                 toggle: function () {
-                    Lampa.Controller.collectionSet(html);
-                    Lampa.Controller.collectionFocus(false, html);
+                    // Ограничиваем коллекцию ТОЛЬКО body (список под tabs).
+                    // Иначе Navigator пересекает tabs (они в html выше body),
+                    // даёт им призрачный focus, но switchTab не вызывается.
+                    Lampa.Controller.collectionSet(body);
+                    Lampa.Controller.collectionFocus(false, body);
                 },
                 up: function () {
                     if (Navigator.canmove('up')) Navigator.move('up');
