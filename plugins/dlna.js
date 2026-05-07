@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.4.3';
+    var PLUGIN_VERSION = '0.5.0';
 
     // Хардкодим — упрощаем MVP. Позже вынесем в Lampa.SettingsApi.
     var PROXY_BASE = 'https://shakespeare-eden-composition-aluminum.trycloudflare.com/proxy/';
@@ -89,6 +89,8 @@
         var cls = node.getElementsByTagName('upnp:class')[0] || node.getElementsByTagName('class')[0];
         info.upnpClass = cls ? cls.textContent : '';
         info.isFolder = info.upnpClass.indexOf('object.container') === 0;
+        var dateEl = node.getElementsByTagName('dc:date')[0];
+        info.date = dateEl ? dateEl.textContent : '';
         var res = node.getElementsByTagName('res')[0];
         if (res) {
             info.url = res.textContent;
@@ -264,11 +266,48 @@
         return virtual.concat(rest);
     }
 
+    // Резолв Object ID для "All Video" в MiniDLNA-индексе.
+    // Корень → ищем "Video" → внутри ищем "All Video" → его id.
+    // Кешируем в Lampa.Storage 'dlna_all_video_id', сбрасываем по ручке.
+    var ALL_VIDEO_ID_KEY = 'dlna_all_video_id';
+    function findAllVideoId(cb) {
+        try {
+            var cached = Lampa.Storage.get(ALL_VIDEO_ID_KEY, '');
+            if (cached) { cb(cached); return; }
+        } catch (e) {}
+        browse('0', function (rootEntries) {
+            var videoFolder = rootEntries.find(function (e) {
+                return e.isFolder && /^video$/i.test(e.title);
+            });
+            if (!videoFolder) { cb(null); return; }
+            browse(videoFolder.id, function (videoEntries) {
+                var allVideo = videoEntries.find(function (e) {
+                    return e.isFolder && /^all\s*video$/i.test(e.title);
+                });
+                if (!allVideo) { cb(null); return; }
+                try { Lampa.Storage.set(ALL_VIDEO_ID_KEY, allVideo.id); } catch (e) {}
+                cb(allVideo.id);
+            }, function () { cb(null); });
+        }, function () { cb(null); });
+    }
+
+    var TABS = [
+        { id: 'all',     title: 'Все' },
+        { id: 'movies',  title: 'Фильмы' },
+        { id: 'series',  title: 'Сериалы' },
+        { id: 'folders', title: 'Папки' }
+    ];
+
     function Component() {
-        // Стек: каждый элемент {id, title} — DLNA folder. Виртуальные группы серий
-        // имеют kind:'episodes' и payload (массив entries уже отрисованных).
-        var stack = [{ id: '0', title: 'Keenetic Ultra' }];
-        var html, head, body, scroll, self = this;
+        var currentTab = 'all';
+        // Стек на каждую вкладку — позволяет сохранить позицию при переключении
+        var stacks = {
+            all:     [{ kind: 'all',     title: 'Все видео' }],
+            movies:  [{ kind: 'movies',  title: 'Фильмы' }],
+            series:  [{ kind: 'series',  title: 'Сериалы' }],
+            folders: [{ id: '0',         title: 'Keenetic Ultra' }]
+        };
+        var html, head, tabsRow, body, scroll, self = this;
 
         this.create = function () {
             html = $('<div class="dlna-keenetic"></div>');
@@ -278,26 +317,53 @@
             scroll.minus(head);
             body.append(scroll.render(true));
             html.append(head).append(body);
+            renderTabs();
             this.activity.loader(true);
             this.openCurrent();
         };
 
-        function setHead(top) {
+        function getStack() { return stacks[currentTab]; }
+
+        function setHead() {
             head.empty();
-            var pathRow = $('<div class="dlna-keenetic__head-path"></div>');
-            pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
-            head.append(pathRow);
+            // Хлебные крошки только для вкладок где пользователь "погружён":
+            // Папки — DLNA-путь; Сериалы внутри сезона — путь сериала.
+            var stack = getStack();
+            if (stack.length > 1) {
+                var pathRow = $('<div class="dlna-keenetic__head-path"></div>');
+                pathRow.text(stack.map(function (s) { return s.title; }).join(' / '));
+                head.append(pathRow);
+            }
+            head.append(tabsRow);
+        }
+
+        function renderTabs() {
+            tabsRow = $('<div class="dlna-keenetic__tabs"></div>');
+            TABS.forEach(function (t) {
+                var btn = $('<div class="selector dlna-keenetic__tab" data-tab="' + t.id + '">' + escapeHtml(t.title) + '</div>');
+                if (t.id === currentTab) btn.addClass('dlna-keenetic__tab--active');
+                btn.on('hover:enter', function () { switchTab(t.id); });
+                btn.on('hover:focus', function () { /* tabs всегда видны, scroll не нужен */ });
+                tabsRow.append(btn);
+            });
+        }
+
+        function switchTab(tabId) {
+            if (tabId === currentTab) return;
+            currentTab = tabId;
+            tabsRow.find('.dlna-keenetic__tab').removeClass('dlna-keenetic__tab--active');
+            tabsRow.find('[data-tab="' + tabId + '"]').addClass('dlna-keenetic__tab--active');
+            self.openCurrent();
         }
 
         this.openCurrent = function () {
+            var stack = getStack();
             var top = stack[stack.length - 1];
-            setHead(top);
+            setHead();
             scroll.clear();
-            scroll.append($('<div style="padding:1em 1.2em;">Загрузка ' + escapeHtml(top.title) + '…</div>'));
+            scroll.append($('<div style="padding:1em 1.2em; opacity:0.7;">Загрузка…</div>'));
 
-            // Виртуальная группа эпизодов — рендерим из памяти, не ходим в DLNA.
-            // Если есть TMDB сериала — подгружаем мету сезона ОДНИМ запросом
-            // и обогащаем каждую серию: название, описание, still-картинка.
+            // Виртуальная группа эпизодов сериала — payload в стеке
             if (top.kind === 'episodes') {
                 var payload = top.payload || [];
                 var seriesTmdb = payload[0] && payload[0]._series && payload[0]._series.tmdb;
@@ -307,9 +373,7 @@
                             var byNum = {};
                             seasonData.episodes.forEach(function (e) { byNum[e.episode_number] = e; });
                             payload.forEach(function (entry) {
-                                if (entry._episode && byNum[entry._episode.episode]) {
-                                    entry._tmdbEpisode = byNum[entry._episode.episode];
-                                }
+                                if (entry._episode && byNum[entry._episode.episode]) entry._tmdbEpisode = byNum[entry._episode.episode];
                             });
                         }
                         renderEntries(payload);
@@ -320,20 +384,51 @@
                 return;
             }
 
-            browse(top.id, function (entries) {
-                renderEntries(entries);
-            }, function (err) {
-                scroll.clear();
-                var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em; font-size:0.9em; word-break:break-all;"></div>');
-                box.append('<b>Ошибка Browse:</b><br>' + escapeHtml(JSON.stringify(err)));
-                scroll.append(box);
-                self.activity.loader(false);
+            // "Папки" — Browse по DLNA-id из стека
+            if (currentTab === 'folders') {
+                browse(top.id, renderEntries, browseError);
+                return;
+            }
+
+            // "Все/Фильмы/Сериалы" — единый источник: All Video из MiniDLNA
+            findAllVideoId(function (allVideoId) {
+                if (!allVideoId) {
+                    scroll.clear();
+                    scroll.append($('<div style="padding:1.5em; color:#ff6464;">Не нашёл папку «All Video» в DLNA-индексе. Перейди на вкладку «Папки» — там навигация по реальной структуре.</div>'));
+                    self.activity.loader(false);
+                    return;
+                }
+                browse(allVideoId, function (entries) {
+                    // Сортируем по dc:date desc (новые сверху)
+                    entries.sort(function (a, b) {
+                        var da = a.date || '', db = b.date || '';
+                        return db.localeCompare(da);
+                    });
+                    if (currentTab === 'movies') {
+                        entries = entries.filter(function (e) { return !e.isFolder && !parseEpisode(e.title); });
+                        renderEntries(entries, /*skipGrouping*/ true);
+                    } else if (currentTab === 'series') {
+                        entries = entries.filter(function (e) { return !e.isFolder && parseEpisode(e.title); });
+                        renderEntries(entries); // groupEpisodes свернёт в виртуальные папки сезонов
+                    } else { // 'all'
+                        renderEntries(entries);
+                    }
+                }, browseError);
             });
         };
+
+        function browseError(err) {
+            scroll.clear();
+            var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em; font-size:0.9em; word-break:break-all;"></div>');
+            box.append('<b>Ошибка Browse:</b><br>' + escapeHtml(JSON.stringify(err)));
+            scroll.append(box);
+            self.activity.loader(false);
+        }
 
         function renderEntries(rawEntries) {
             scroll.clear();
 
+            var stack = getStack();
             if (stack.length > 1) {
                 var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
                 backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
@@ -343,8 +438,10 @@
 
             // Внутри виртуальной папки серии уже разобраны — повторная группировка
             // снова свернет их в одну "Сезон 1 · 1 сер." → бесконечная вложенность.
+            // Также пропускаем группировку на вкладке "movies" (там уже фильтр без серий).
             var top = stack[stack.length - 1];
-            var entries = top.kind === 'episodes' ? rawEntries : groupEpisodes(rawEntries);
+            var skipGroup = top.kind === 'episodes' || currentTab === 'movies';
+            var entries = skipGroup ? rawEntries : groupEpisodes(rawEntries);
 
             if (!entries.length) {
                 scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
@@ -369,7 +466,7 @@
                 var line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
                 line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
                 line.on('hover:enter', function () {
-                    stack.push({ id: entry.id, title: entry.title });
+                    getStack().push({ id: entry.id, title: entry.title });
                     self.openCurrent();
                 });
                 return line;
@@ -416,11 +513,11 @@
             });
 
             line.on('hover:enter', function () {
-                stack.push({
+                getStack().push({
                     kind: 'episodes',
                     title: (entry.tmdb ? (entry.tmdb.name || entry.tmdb.original_name) : entry.show) + ' · Сезон ' + entry.season,
                     payload: entry.episodes.map(function (e) {
-                        e._series = entry; // ссылка на серию для hash + card
+                        e._series = entry;
                         return e;
                     })
                 });
@@ -604,7 +701,8 @@
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
                 back: function () {
-                    if (stack.length > 1) { stack.pop(); self.openCurrent(); }
+                    var s = getStack();
+                    if (s.length > 1) { s.pop(); self.openCurrent(); }
                     else Lampa.Activity.backward();
                 }
             });
@@ -629,6 +727,10 @@
             '.dlna-keenetic__head{flex:0 0 auto;padding:0.4em 1.2em 0.6em;}' +
             '.dlna-keenetic__head-path{font-size:0.85em;opacity:0.6;word-break:break-all;margin-bottom:0.4em;}' +
             '.dlna-keenetic__body{flex:1 1 auto;min-height:0;}' +
+            // Tabs: горизонтальный ряд
+            '.dlna-keenetic__tabs{display:flex;gap:0.4em;flex-wrap:wrap;}' +
+            '.dlna-keenetic__tab{padding:0.5em 1.1em;border-radius:0.4em;font-weight:600;cursor:pointer;background:transparent;}' +
+            '.dlna-keenetic__tab--active{background:rgba(255,255,255,0.18);}' +
             // Selector: только легкое осветление фона на focus.
             // Никаких теней/outline/transition — Tizen WebKit 76 на TV лагает.
             '.dlna-keenetic .selector{position:relative;}' +
