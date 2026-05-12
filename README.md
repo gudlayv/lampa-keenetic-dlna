@@ -97,16 +97,16 @@ curl -sSL https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main/scr
 В LAMPA на TV: **Расширения → Добавить URL**
 
 ```
-https://cdn.jsdelivr.net/gh/gudlayv/lampa-keenetic-dlna@main/plugins/dlna.js
+https://rawcdn.githack.com/gudlayv/lampa-keenetic-dlna/main/plugins/dlna.js
 ```
 
-> Используем jsdelivr-CDN потому что `raw.githubusercontent.com` отдаёт
+> Используем githack-CDN потому что `raw.githubusercontent.com` отдает
 > `Content-Type: text/plain` + `nosniff`, и браузер LAMPA отказывается
-> выполнять такой ответ как JavaScript. jsdelivr отдаёт правильный
+> выполнять такой ответ как JavaScript. githack отдает правильный
 > `application/javascript`.
 >
-> jsdelivr кеширует. Если правишь код, добавляй querystring (`?v=2`) или
-> используй commit-hash в URL (`@<sha>`) чтобы подхватить свежую версию.
+> githack кеширует. Если правишь код, добавляй querystring (`?v=2`) или
+> используй commit-hash в URL вместо `main` чтобы подхватить свежую версию.
 
 ### 4. Настройка плагина
 
