@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.7.0';
+    var PLUGIN_VERSION = '0.8.0';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -691,13 +691,14 @@
             html.append(head).append(body);
             initFilter();
             this.activity.loader(true);
-            // Когда IndexService обновился — перерисуем активную вкладку
-            // (только если она использует индекс, а не Folders).
+            // Когда IndexService обновился (или упал) — перерисуем
+            // активную вкладку (только если она использует индекс).
             self._onIndex = function (e) {
                 if (self._destroyed) return;
-                if (e.type !== 'ready' && e.type !== 'updated') return;
                 if (currentTab === 'folders') return;
-                self.openCurrent({ skipControllerToggle: true });
+                if (e.type === 'ready' || e.type === 'updated' || e.type === 'error') {
+                    self.openCurrent({ skipControllerToggle: true });
+                }
             };
             if (window.Lampa && Lampa.Listener) Lampa.Listener.follow('dlna_index', self._onIndex);
             this.openCurrent();
@@ -1564,6 +1565,25 @@
                 field: {
                     name: 'Прокси URL',
                     description: 'HTTP(S)-прокси для обхода CORS preflight. По дефолту — прокси из install.sh на самом Кинетике. См. README.'
+                }
+            });
+            // Кнопка ручного refresh. Спек называет тип 'button', но в
+            // LAMPA-source я не нашел его в hard-coded списке типов
+            // params — используем trigger с default=false и сбрасываем
+            // флаг в onChange (стандартный паттерн для триггерных
+            // действий, видел в других плагинах).
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: 'dlna_refresh_index', type: 'trigger', default: false },
+                field: {
+                    name: 'Обновить DLNA-индекс',
+                    description: 'Пересканировать DLNA и обновить кеш совпадений с TMDB'
+                },
+                onChange: function () {
+                    try { Lampa.Storage.set('dlna_refresh_index', false); } catch (e) {}
+                    try { Lampa.Storage.set(ALL_VIDEO_ID_KEY, ''); } catch (e) {}
+                    try { IndexService.refresh({ full: true }); } catch (e) {}
+                    if (window.Lampa && Lampa.Noty) Lampa.Noty.show('DLNA: обновление индекса запущено');
                 }
             });
         }
