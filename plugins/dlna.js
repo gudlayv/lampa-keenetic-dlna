@@ -294,6 +294,317 @@
         return virtual.concat(rest);
     }
 
+    // Параллельный пул с ограниченным concurrency. Каждая задача — функция (done).
+    function runPool(tasks, concurrency, onAllDone) {
+        if (!tasks.length) { onAllDone(); return; }
+        var i = 0, running = 0, finished = 0, total = tasks.length;
+        function next() {
+            while (running < concurrency && i < total) {
+                running++;
+                var task = tasks[i++];
+                task(function () {
+                    running--; finished++;
+                    if (finished === total) onAllDone();
+                    else next();
+                });
+            }
+        }
+        next();
+    }
+
+    // ===== IndexService =====
+    // Фоновый индекс DLNA с матчингом на TMDB. Источник истины для
+    // вкладки "Movies", кнопки на стандартной карточке LAMPA и Activity
+    // "Список серий". Поднимается на app:ready, кеш в Lampa.Storage.
+
+    var INDEX_STORAGE_KEY = 'dlna_index_v1';
+    var INDEX_VERSION = 1;
+    var INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+    var IndexService = (function () {
+        var listeners = { ready: [], updated: [], error: [] };
+        var state = {
+            status: 'idle',
+            byMovieId: Object.create(null),   // map: tmdb_id → Entry[]
+            bySeriesId: Object.create(null),  // map: tmdb_id → { byEp: {SxxExx: Entry}, seasons: Set }
+            allEntries: [],
+            ts: 0,
+            addr: '',
+            error: null
+        };
+        var inflight = null; // promise-like guard для refresh/quickCheck
+
+        function epKey(season, episode) {
+            return 'S' + season + 'E' + episode;
+        }
+
+        function fire(type, payload) {
+            (listeners[type] || []).forEach(function (cb) {
+                try { cb(payload); } catch (e) {}
+            });
+            // Дублируем в общий Listener, чтобы CardButton и др. могли
+            // подписываться через стандартный механизм LAMPA.
+            try {
+                if (window.Lampa && Lampa.Listener) {
+                    Lampa.Listener.send('dlna_index', Object.assign({ type: type }, payload || {}));
+                }
+            } catch (e) {}
+        }
+
+        function rebuildMaps(entries, moviesMap, seriesMap) {
+            // Восстанавливаем byMovieId/bySeriesId из flat-списка entries
+            // (используется и при load, и при инкрементальном refresh).
+            var byUrl = Object.create(null);
+            entries.forEach(function (e) { if (e.url) byUrl[e.url] = e; });
+
+            var byMovie = Object.create(null);
+            Object.keys(moviesMap || {}).forEach(function (id) {
+                var urls = moviesMap[id] || [];
+                var arr = [];
+                urls.forEach(function (u) { if (byUrl[u]) arr.push(byUrl[u]); });
+                if (arr.length) byMovie[id] = arr;
+            });
+
+            var bySeries = Object.create(null);
+            Object.keys(seriesMap || {}).forEach(function (id) {
+                var byEp = Object.create(null);
+                var seasons = Object.create(null);
+                var epMap = seriesMap[id] || {};
+                Object.keys(epMap).forEach(function (k) {
+                    var u = epMap[k];
+                    if (byUrl[u]) {
+                        byEp[k] = byUrl[u];
+                        var m = k.match(/^S(\d+)E\d+$/);
+                        if (m) seasons[parseInt(m[1], 10)] = true;
+                    }
+                });
+                if (Object.keys(byEp).length) {
+                    bySeries[id] = { byEp: byEp, seasons: Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }) };
+                }
+            });
+
+            return { byMovieId: byMovie, bySeriesId: bySeries };
+        }
+
+        function persist() {
+            try {
+                if (!window.Lampa || !Lampa.Storage) return;
+                var movies = Object.create(null);
+                Object.keys(state.byMovieId).forEach(function (id) {
+                    movies[id] = state.byMovieId[id].map(function (e) { return e.url; }).filter(Boolean);
+                });
+                var series = Object.create(null);
+                Object.keys(state.bySeriesId).forEach(function (id) {
+                    var m = state.bySeriesId[id].byEp;
+                    var out = Object.create(null);
+                    Object.keys(m).forEach(function (k) { if (m[k].url) out[k] = m[k].url; });
+                    series[id] = out;
+                });
+                Lampa.Storage.set(INDEX_STORAGE_KEY, {
+                    version: INDEX_VERSION,
+                    ts: state.ts,
+                    addr: state.addr,
+                    entries: state.allEntries,
+                    movies: movies,
+                    series: series
+                });
+            } catch (e) {}
+        }
+
+        function load() {
+            try {
+                if (!window.Lampa || !Lampa.Storage) return;
+                var snap = Lampa.Storage.get(INDEX_STORAGE_KEY, '');
+                if (!snap || typeof snap !== 'object' || snap.version !== INDEX_VERSION) return;
+                if (snap.addr && snap.addr !== dlnaAddr()) return; // адрес сменился — кеш не валиден
+                state.allEntries = Array.isArray(snap.entries) ? snap.entries : [];
+                var maps = rebuildMaps(state.allEntries, snap.movies || {}, snap.series || {});
+                state.byMovieId = maps.byMovieId;
+                state.bySeriesId = maps.bySeriesId;
+                state.ts = snap.ts || 0;
+                state.addr = snap.addr || dlnaAddr();
+                state.status = 'ready';
+                state.error = null;
+                fire('ready', { fromCache: true });
+            } catch (e) {}
+        }
+
+        // Внутренний sweep: получает плоский список Entry'ев из All Video.
+        // success(entries), error({message}).
+        function sweepBrowse(success, error) {
+            findAllVideoId(function (allVideoId) {
+                if (!allVideoId) { error({ message: 'no_all_video' }); return; }
+                browse(allVideoId, function (entries) { success(entries); }, function (err) { error(err); });
+            });
+        }
+
+        // Полная пересборка индекса.
+        function doFullRefresh(done) {
+            sweepBrowse(function (rawEntries) {
+                // Разбиваем на одиночки и группы серий
+                var singles = [];
+                var seriesGroupsByKey = Object.create(null);
+                rawEntries.forEach(function (e) {
+                    if (e.isFolder) return; // папки внутри All Video — игнорируем
+                    var ep = parseEpisode(e.title);
+                    if (ep) {
+                        e._episode = ep;
+                        var key = ep.show.toLowerCase();
+                        if (!seriesGroupsByKey[key]) seriesGroupsByKey[key] = { show: ep.show, episodes: [] };
+                        seriesGroupsByKey[key].episodes.push(e);
+                    } else {
+                        e._parsed = parseFilename(e.title);
+                        singles.push(e);
+                    }
+                });
+
+                var newByMovie = Object.create(null);
+                var newBySeries = Object.create(null);
+                var allEntries = [];
+
+                // TMDB-запросы для фильмов параллельно с ограничением.
+                var movieTasks = singles.map(function (entry) {
+                    return function (taskDone) {
+                        tmdbSearch(entry._parsed.title, entry._parsed.year, 'movie', function (hit) {
+                            if (hit && hit.id != null) {
+                                entry._tmdb = hit;
+                                var arr = newByMovie[hit.id] || (newByMovie[hit.id] = []);
+                                arr.push(entry);
+                            }
+                            allEntries.push(entry);
+                            taskDone();
+                        });
+                    };
+                });
+
+                // 1 TMDB-запрос на сериал (на группу).
+                var seriesTasks = Object.keys(seriesGroupsByKey).map(function (gk) {
+                    var grp = seriesGroupsByKey[gk];
+                    return function (taskDone) {
+                        tmdbSearch(grp.show, null, 'tv', function (hit) {
+                            if (hit && hit.id != null) {
+                                var bucket = newBySeries[hit.id];
+                                if (!bucket) {
+                                    bucket = newBySeries[hit.id] = { byEp: Object.create(null), seasons: [] };
+                                }
+                                var seasonsSet = Object.create(null);
+                                bucket.seasons.forEach(function (s) { seasonsSet[s] = true; });
+                                grp.episodes.forEach(function (ep) {
+                                    ep._tmdb = hit;
+                                    var k = epKey(ep._episode.season, ep._episode.episode);
+                                    bucket.byEp[k] = ep;
+                                    seasonsSet[ep._episode.season] = true;
+                                });
+                                bucket.seasons = Object.keys(seasonsSet).map(Number).sort(function (a, b) { return a - b; });
+                            }
+                            grp.episodes.forEach(function (ep) { allEntries.push(ep); });
+                            taskDone();
+                        });
+                    };
+                });
+
+                var allTasks = movieTasks.concat(seriesTasks);
+                runPool(allTasks, 5, function () {
+                    state.byMovieId = newByMovie;
+                    state.bySeriesId = newBySeries;
+                    state.allEntries = allEntries;
+                    state.ts = Date.now();
+                    state.addr = dlnaAddr();
+                    state.status = 'ready';
+                    state.error = null;
+                    persist();
+                    fire('updated', { fromCache: false });
+                    done(null);
+                });
+            }, function (err) {
+                state.status = 'error';
+                state.error = err && err.message ? err.message : 'browse_failed';
+                fire('error', { error: state.error });
+                done(state.error);
+            });
+        }
+
+        // quickCheck: легкий sweep, сравнение URL-сета с кешем.
+        // diff → fallback к doFullRefresh (инкрементальная версия не дает
+        // существенной экономии — TMDB-кеш уже работает, а парсинг дешев).
+        function doQuickCheck(done) {
+            sweepBrowse(function (rawEntries) {
+                var nowFiles = rawEntries.filter(function (e) { return !e.isFolder && e.url; });
+                var oldUrls = Object.create(null);
+                state.allEntries.forEach(function (e) { if (e.url) oldUrls[e.url] = true; });
+                var newUrls = Object.create(null);
+                nowFiles.forEach(function (e) { newUrls[e.url] = true; });
+                var sameSize = nowFiles.length === state.allEntries.length;
+                var same = sameSize && Object.keys(newUrls).every(function (u) { return oldUrls[u]; });
+                if (same) {
+                    state.ts = Date.now();
+                    persist();
+                    done(null);
+                    return;
+                }
+                doFullRefresh(done);
+            }, function (err) {
+                state.status = 'error';
+                state.error = err && err.message ? err.message : 'browse_failed';
+                fire('error', { error: state.error });
+                done(state.error);
+            });
+        }
+
+        function refresh(opts, done) {
+            opts = opts || {};
+            done = done || function () {};
+            if (inflight) { done('busy'); return; }
+            state.status = 'loading';
+            inflight = true;
+            var fn = opts.full ? doFullRefresh : doQuickCheck;
+            fn(function (err) {
+                inflight = null;
+                if (err && state.status !== 'ready') {
+                    // status уже выставлен в error внутри fn
+                    done(err);
+                } else {
+                    done(null);
+                }
+            });
+        }
+
+        function quickCheck(done) { refresh({ full: false }, done); }
+
+        function lookupMovie(tmdbId) {
+            if (tmdbId == null) return null;
+            var arr = state.byMovieId[tmdbId];
+            return arr && arr.length ? arr : null;
+        }
+
+        function lookupSeries(tmdbId) {
+            if (tmdbId == null) return null;
+            var b = state.bySeriesId[tmdbId];
+            if (!b) return null;
+            // byEp в формате Object — преобразуем размер для consumers
+            var size = 0;
+            for (var _k in b.byEp) if (Object.prototype.hasOwnProperty.call(b.byEp, _k)) size++;
+            if (!size) return null;
+            return { byEp: b.byEp, seasons: b.seasons, size: size };
+        }
+
+        function on(type, cb) {
+            if (!listeners[type]) listeners[type] = [];
+            listeners[type].push(cb);
+        }
+
+        return {
+            load: load,
+            refresh: refresh,
+            quickCheck: quickCheck,
+            lookupMovie: lookupMovie,
+            lookupSeries: lookupSeries,
+            on: on,
+            get state() { return state.status; },
+            get raw() { return state; }
+        };
+    })();
+
     // Резолв Object ID для "All Video" в MiniDLNA-индексе.
     // Корень → ищем "Video" → внутри ищем "All Video" → его id.
     // Кешируем в Lampa.Storage 'dlna_all_video_id', сбрасываем по ручке.
@@ -894,7 +1205,12 @@
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
                 param: { name: STORAGE_DLNA_ADDR, type: 'input', placeholder: '192.168.1.1:8200', values: '', default: DEFAULT_DLNA_ADDR },
-                field: { name: 'Адрес DLNA-сервера', description: 'IP:порт MiniDLNA на Кинетике. По умолчанию 192.168.1.1:8200.' }
+                field: { name: 'Адрес DLNA-сервера', description: 'IP:порт MiniDLNA на Кинетике. По умолчанию 192.168.1.1:8200.' },
+                onChange: function () {
+                    // Адрес сменился — кеш index не валиден, тянем заново.
+                    try { Lampa.Storage.set(ALL_VIDEO_ID_KEY, ''); } catch (e) {}
+                    try { IndexService.refresh({ full: true }); } catch (e) {}
+                }
             });
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
@@ -930,8 +1246,19 @@
             $('.menu .menu__list').eq(0).append(button);
         }
 
-        if (window.appready) addMenu();
-        else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') addMenu(); });
+        function bootIndex() {
+            // Warm: моментально из Storage; cold-quickCheck отложен,
+            // чтобы не конкурировать со стартом LAMPA.
+            try { IndexService.load(); } catch (e) {}
+            setTimeout(function () {
+                try { IndexService.quickCheck(); } catch (e) {}
+            }, 2000);
+        }
+
+        if (window.appready) { addMenu(); bootIndex(); }
+        else Lampa.Listener.follow('app', function (e) {
+            if (e.type === 'ready') { addMenu(); bootIndex(); }
+        });
 
         Lampa.Manifest.plugins = manifest;
     }
