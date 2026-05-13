@@ -637,6 +637,40 @@
         { id: 'folders', title: 'Папки' }
     ];
 
+    // Универсальный плеер для DLNA-entry с TMDB-карточкой.
+    // Используется CardButton (стандартная карточка LAMPA),
+    // EpisodeListComponent (Activity со списком серий) и
+    // Component.playEntry (внутренняя вкладка Movies — как обертка).
+    function playMovie(entry, card, displayTitle) {
+        if (!entry || !entry.url) {
+            if (window.Lampa && Lampa.Noty) Lampa.Noty.show('Нет URL для воспроизведения');
+            return;
+        }
+        var ep = entry._episode || null;
+        var hash = card ? lampaHash(card, ep ? ep.season : null, ep ? ep.episode : null) : null;
+        if (!hash) hash = fileHash(entry.url);
+
+        var durSec = parseDurationToSeconds(entry.duration);
+        var timeline = (window.Lampa && Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
+        if (timeline) {
+            timeline.hash = hash;
+            if (durSec && !timeline.duration) {
+                timeline.duration = durSec;
+                if (timeline.handler) timeline.handler(timeline.percent || 0, timeline.time || 0, durSec);
+            }
+        }
+
+        try {
+            if (card && window.Lampa && Lampa.Favorite && Lampa.Favorite.add) {
+                Lampa.Favorite.add('history', card, 100);
+            }
+        } catch (e) {}
+
+        var title = displayTitle || (card && (card.title || card.name || card.original_title || card.original_name)) || entry.title;
+        Lampa.Player.play({ title: title, url: entry.url, card: card || undefined, timeline: timeline });
+        Lampa.Player.playlist([{ title: title, url: entry.url, card: card || undefined, timeline: timeline }]);
+    }
+
     function Component() {
         var currentTab = 'all';
         var stacks = {
@@ -657,6 +691,15 @@
             html.append(head).append(body);
             initFilter();
             this.activity.loader(true);
+            // Когда IndexService обновился — перерисуем активную вкладку
+            // (только если она использует индекс, а не Folders).
+            self._onIndex = function (e) {
+                if (self._destroyed) return;
+                if (e.type !== 'ready' && e.type !== 'updated') return;
+                if (currentTab === 'folders') return;
+                self.openCurrent({ skipControllerToggle: true });
+            };
+            if (window.Lampa && Lampa.Listener) Lampa.Listener.follow('dlna_index', self._onIndex);
             this.openCurrent();
         };
 
@@ -753,33 +796,43 @@
                 return;
             }
 
-            // "Папки" — Browse по DLNA-id из стека
+            // "Папки" — Browse по DLNA-id из стека (живые SOAP-запросы)
             if (currentTab === 'folders') {
                 browse(top.id, function (entries) { renderEntries(entries, opts); }, browseError);
                 return;
             }
 
-            // "Все/Фильмы/Сериалы" — единый источник: All Video из MiniDLNA
-            findAllVideoId(function (allVideoId) {
-                if (!allVideoId) {
-                    scroll.clear();
-                    scroll.append($('<div style="padding:1.5em; color:#ff6464;">Не нашёл папку «All Video» в DLNA-индексе. Перейди на вкладку «Папки» — там навигация по реальной структуре.</div>'));
-                    self.activity.loader(false);
-                    return;
+            // "Все/Фильмы/Сериалы" — источник IndexService.
+            // Если индекс не готов — показываем лоадер и ждем dlna_index:ready;
+            // на холодном старте параллельно дергаем refresh.
+            var renderFromIndex = function () {
+                var entries = (IndexService.raw && IndexService.raw.allEntries) || [];
+                // copy, чтобы не портить state.allEntries порядком сортировки
+                entries = entries.slice().sort(function (a, b) {
+                    var da = a.date || '', db = b.date || '';
+                    return db.localeCompare(da);
+                });
+                if (currentTab === 'movies') {
+                    entries = entries.filter(function (e) { return !e.isFolder && !e._episode; });
+                } else if (currentTab === 'series') {
+                    entries = entries.filter(function (e) { return !e.isFolder && e._episode; });
                 }
-                browse(allVideoId, function (entries) {
-                    entries.sort(function (a, b) {
-                        var da = a.date || '', db = b.date || '';
-                        return db.localeCompare(da);
-                    });
-                    if (currentTab === 'movies') {
-                        entries = entries.filter(function (e) { return !e.isFolder && !parseEpisode(e.title); });
-                    } else if (currentTab === 'series') {
-                        entries = entries.filter(function (e) { return !e.isFolder && parseEpisode(e.title); });
-                    }
-                    renderEntries(entries, opts);
-                }, browseError);
-            });
+                renderEntries(entries, opts);
+            };
+
+            var st = IndexService.state;
+            if (st === 'ready') {
+                renderFromIndex();
+            } else if (st === 'error') {
+                browseError({ message: (IndexService.raw && IndexService.raw.error) || 'index_error' });
+            } else {
+                // 'idle' или 'loading' — попросим индекс собраться и
+                // подождем события dlna_index:ready (см. подписку в create()).
+                if (st === 'idle') {
+                    try { IndexService.refresh({ full: true }); } catch (e) {}
+                }
+                // лоадер уже висит из верха openCurrent
+            }
         };
 
         function browseError(err) {
@@ -868,8 +921,7 @@
             info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
             line.append(info);
 
-            // TMDB-поиск как сериал
-            tmdbSearch(entry.show, null, 'tv', function (hit) {
+            function applyTmdbSeries(hit) {
                 var box = info.find('.dlna-row__tmdb');
                 if (!hit) {
                     box.text('TMDB: не найдено').css('color', '#888');
@@ -891,7 +943,16 @@
                     poster.empty();
                 }
                 entry.tmdb = hit;
-            });
+            }
+
+            // Если IndexService уже разрезолвил серии — переиспользуем _tmdb
+            // первой серии вместо повторного TMDB-запроса.
+            var cachedSeriesTmdb = entry.episodes[0] && entry.episodes[0]._tmdb;
+            if (cachedSeriesTmdb) {
+                applyTmdbSeries(cachedSeriesTmdb);
+            } else {
+                tmdbSearch(entry.show, null, 'tv', applyTmdbSeries);
+            }
 
             line.on('hover:enter', function () {
                 getStack().push({
@@ -977,8 +1038,8 @@
 
             // TMDB-обогащение для одиночного фильма
             if (!episode) {
-                var parsed = parseFilename(entry.title);
-                tmdbSearch(parsed.title, parsed.year, 'movie', function (hit) {
+                var parsed = entry._parsed || parseFilename(entry.title);
+                function applyTmdbMovie(hit) {
                     var box = info.find('.dlna-row__tmdb');
                     if (!hit) {
                         box.text(parsed.year ? ('TMDB: не найдено · ' + parsed.title + ' (' + parsed.year + ')') : 'TMDB: не найдено').css('color', '#888');
@@ -1008,7 +1069,9 @@
                     // Перезаписываем hash на LAMPA-формат — чтобы прогресс был виден на main TMDB-карточке
                     var newHash = lampaHash(hit);
                     if (newHash) updateRowHash(line, info, entry, newHash);
-                });
+                }
+                if (entry._tmdb) applyTmdbMovie(entry._tmdb);
+                else tmdbSearch(parsed.title, parsed.year, 'movie', applyTmdbMovie);
             }
 
             line.on('hover:enter', function () { playEntry(entry, episode); });
@@ -1028,43 +1091,27 @@
         }
 
         function playEntry(entry, episode) {
-            if (!entry.url) { Lampa.Noty.show('Нет URL для воспроизведения'); return; }
-
-            var seriesTmdb = entry._series && entry._series.tmdb;
+            if (!entry || !entry.url) {
+                if (window.Lampa && Lampa.Noty) Lampa.Noty.show('Нет URL для воспроизведения');
+                return;
+            }
+            var seriesTmdb = (entry._series && entry._series.tmdb) || (episode && entry._tmdb);
             var card;
-            var hash;
             var title;
-
             if (episode && seriesTmdb) {
-                // Сериал с TMDB
                 card = Object.assign({}, seriesTmdb, { source: 'tmdb', method: 'tv' });
-                hash = lampaHash(card, episode.season, episode.episode) || fileHash(entry.url);
                 title = (card.name || card.original_name) + ' · S' + episode.season + 'E' + episode.episode;
-            } else if (entry.tmdb) {
-                // Одиночный фильм с TMDB
-                card = Object.assign({}, entry.tmdb, { source: 'tmdb', method: 'movie' });
-                hash = lampaHash(card) || fileHash(entry.url);
+            } else if (entry.tmdb || entry._tmdb) {
+                var hit = entry.tmdb || entry._tmdb;
+                card = Object.assign({}, hit, { source: 'tmdb', method: 'movie' });
                 title = card.title || card.original_title;
             } else {
-                // Без TMDB — fallback
-                hash = entry._hash || fileHash(entry.url);
-                card = buildCard(entry, hash);
+                // Без TMDB — fallback-карточка (Folders, не распознанный фильм)
+                var fbHash = entry._hash || fileHash(entry.url);
+                card = buildCard(entry, fbHash);
                 title = entry.title;
             }
-
-            var durSec = parseDurationToSeconds(entry.duration);
-            var timeline = (Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
-            if (timeline && durSec && !timeline.duration) {
-                timeline.duration = durSec;
-                if (timeline.handler) timeline.handler(timeline.percent || 0, timeline.time || 0, durSec);
-            }
-
-            try {
-                if (Lampa.Favorite && Lampa.Favorite.add) Lampa.Favorite.add('history', card, 100);
-            } catch (e) {}
-
-            Lampa.Player.play({ title: title, url: entry.url, card: card, timeline: timeline });
-            Lampa.Player.playlist([{ title: title, url: entry.url, card: card, timeline: timeline }]);
+            playMovie(entry, card, title);
         }
 
         this.render = function () { return html; };
@@ -1155,6 +1202,167 @@
         this.pause = function () {};
         this.stop = function () {};
         this.destroy = function () {
+            self._destroyed = true;
+            if (scroll) scroll.destroy();
+            if (html) html.remove();
+        };
+    }
+
+    // ===== EpisodeListComponent =====
+    // Activity-компонент со списком серий по DLNA-индексу для конкретной
+    // TMDB-карточки сериала. Запускается из CardButton (см. ниже).
+    // object.card — карточка TV из IndexService/standard TMDB.
+    function EpisodeListComponent(object) {
+        var card = object.card || (Lampa.Activity.active() && Lampa.Activity.active().card);
+        var html, body, scroll, self = this;
+
+        this.create = function () {
+            html = $('<div class="dlna-keenetic dlna-keenetic--episodes"></div>');
+            body = $('<div class="dlna-keenetic__body"></div>');
+            scroll = new Lampa.Scroll({ mask: true, over: true });
+            body.append(scroll.render(true));
+            html.append(body);
+            this.activity.loader(true);
+            renderAll();
+        };
+
+        function renderAll() {
+            scroll.clear();
+            if (!card || card.id == null) {
+                scroll.append($('<div style="padding:1.5em; color:#ff6464;">Нет данных о сериале.</div>'));
+                self.activity.loader(false);
+                self.activity.toggle();
+                Lampa.Controller.toggle('content');
+                return;
+            }
+            var match = IndexService.lookupSeries(card.id);
+            if (!match) {
+                scroll.append($('<div style="padding:1.5em; opacity:0.7;">Серии этого сериала не найдены в DLNA-индексе.</div>'));
+                self.activity.loader(false);
+                self.activity.toggle();
+                Lampa.Controller.toggle('content');
+                return;
+            }
+
+            // Header: заглушка с инфо о сериале
+            var head = $('<div style="margin:0.4em 1em 0.8em; font-size:1.1em; font-weight:600; opacity:0.9;"></div>');
+            head.text((card.name || card.original_name || 'Сериал') + ' · DLNA');
+            scroll.append(head);
+
+            // Группируем доступные серии по сезонам
+            var bySeason = {};
+            Object.keys(match.byEp).forEach(function (k) {
+                var m = k.match(/^S(\d+)E(\d+)$/);
+                if (!m) return;
+                var season = parseInt(m[1], 10);
+                var episode = parseInt(m[2], 10);
+                if (!bySeason[season]) bySeason[season] = [];
+                bySeason[season].push({ episode: episode, key: k, entry: match.byEp[k] });
+            });
+            var seasons = Object.keys(bySeason).map(Number).sort(function (a, b) { return a - b; });
+
+            seasons.forEach(function (season) {
+                var sHead = $('<div style="margin:0.8em 1em 0.3em; font-size:0.95em; opacity:0.7;"></div>');
+                sHead.text('Сезон ' + season);
+                scroll.append(sHead);
+
+                bySeason[season].sort(function (a, b) { return a.episode - b.episode; });
+
+                // Для метаданных серий — один запрос на сезон
+                tmdbSeason(card.id, season, function (seasonData) {
+                    var byNum = {};
+                    if (seasonData && seasonData.episodes) {
+                        seasonData.episodes.forEach(function (e) { byNum[e.episode_number] = e; });
+                    }
+                    bySeason[season].forEach(function (it) {
+                        var tmdbEp = byNum[it.episode] || null;
+                        it.entry._tmdbEpisode = tmdbEp;
+                        var row = buildEpisodeRow(it.entry, it.episode, season, tmdbEp);
+                        scroll.append(row);
+                    });
+                    // hover:focus у первой строки — для scroll-update
+                });
+            });
+
+            self.activity.loader(false);
+            self.activity.toggle();
+            Lampa.Controller.toggle('content');
+        }
+
+        function buildEpisodeRow(entry, episodeNum, season, tmdbEp) {
+            var seriesCard = card;
+            var hash = lampaHash(seriesCard, season, episodeNum) || fileHash(entry.url);
+            entry._hash = hash;
+            var savedTl = (window.Lampa && Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : null;
+
+            var line = $('<div class="selector dlna-row dlna-row--video" data-hash="' + hash + '" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
+            var posterStyle = 'flex:0 0 auto; width:8em; height:4.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center; position:relative;';
+            var poster = $('<div class="dlna-row__poster" style="' + posterStyle + '"></div>');
+            poster.html('<div style="opacity:0.4;">' + ICON_VIDEO + '</div>');
+            if (tmdbEp && tmdbEp.still_path) {
+                poster.css({
+                    'background-image': 'url("' + tmdbPosterUrl(tmdbEp.still_path, 'w300') + '")',
+                    'background-size': 'cover', 'background-position': 'center'
+                });
+                poster.empty();
+            }
+            if (savedTl && savedTl.percent >= 80) {
+                poster.append('<div class="dlna-row__watched" style="position:absolute; top:0.2em; right:0.2em; width:1.2em; height:1.2em; background:#7ed957; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#000; font-size:0.7em; font-weight:bold;">✓</div>');
+            }
+            line.append(poster);
+
+            var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
+            var prefix = 'S' + season.toString().padStart(2, '0') + 'E' + episodeNum.toString().padStart(2, '0');
+            var name = (tmdbEp && tmdbEp.name) ? tmdbEp.name : ('Серия ' + episodeNum);
+            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em;"><span style="color:#7ed957; font-family:monospace; margin-right:0.5em;">' + prefix + '</span>' + escapeHtml(name) + '</div>');
+            if (tmdbEp && tmdbEp.overview) {
+                info.append('<div class="dlna-row__overview" style="font-size:0.78em; opacity:0.7; margin-top:0.2em; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">' + escapeHtml(tmdbEp.overview) + '</div>');
+            }
+            var localMeta = [];
+            if (entry.resolution) localMeta.push(entry.resolution);
+            if (entry.duration) localMeta.push(entry.duration);
+            if (entry.size) localMeta.push(formatSize(entry.size));
+            if (localMeta.length) {
+                info.append('<div class="dlna-row__local" style="font-size:0.75em; opacity:0.5; margin-top:0.2em;">' + escapeHtml(localMeta.join(' · ')) + '</div>');
+            }
+            if (savedTl && savedTl.percent > 0) {
+                info.append('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:#7ed957; width:' + Math.min(100, savedTl.percent) + '%;"></div></div>');
+            }
+            line.append(info);
+
+            line.on('hover:focus', function () { scroll.update(line); });
+            line.on('hover:enter', function () {
+                var sCard = Object.assign({}, seriesCard, { source: 'tmdb', method: 'tv' });
+                // Передаем эпизод-инфу плееру через временное поле,
+                // чтобы playMovie мог сгенерировать корректный hash.
+                entry._episode = entry._episode || { season: season, episode: episodeNum };
+                playMovie(entry, sCard, (sCard.name || sCard.original_name || '') + ' · ' + prefix + (tmdbEp && tmdbEp.name ? (' · ' + tmdbEp.name) : ''));
+            });
+            return line;
+        }
+
+        this.render = function () { return html; };
+
+        this.start = function () {
+            if (Lampa.Activity.active() && Lampa.Activity.active().activity !== this.activity) return;
+            Lampa.Controller.add('content', {
+                invisible: true,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(body);
+                    Lampa.Controller.collectionFocus(false, body);
+                },
+                up:    function () { if (Navigator.canmove('up'))    Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down:  function () { if (Navigator.canmove('down'))  Navigator.move('down'); },
+                left:  function () { if (Navigator.canmove('left'))  Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { if (Navigator.canmove('right')) Navigator.move('right'); },
+                back:  function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+
+        this.pause   = function () {};
+        this.stop    = function () {};
+        this.destroy = function () {
             if (scroll) scroll.destroy();
             if (html) html.remove();
         };
@@ -1193,6 +1401,7 @@
         };
 
         Lampa.Component.add(manifest.component, Component);
+        Lampa.Component.add('keenetic_dlna_episodes', EpisodeListComponent);
         registerSettings();
 
         function registerSettings() {
