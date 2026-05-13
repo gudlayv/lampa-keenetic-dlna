@@ -1368,6 +1368,143 @@
         };
     }
 
+    // ===== CardButton =====
+    // DOM-кнопка "Смотреть с DLNA" на стандартной TMDB-карточке LAMPA.
+    // Появляется, если IndexService нашел матч; ведет в плеер (фильм)
+    // или в Activity со списком серий (сериал).
+    var CardButton = (function () {
+        var ICON_DLNA =
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<rect x="2" y="6" width="20" height="12" rx="2"/>' +
+                '<polygon points="10 9 16 12 10 15" fill="currentColor"/>' +
+            '</svg>';
+
+        function pluralize(n, forms) {
+            // forms: [one, few, many]
+            var mod10 = n % 10, mod100 = n % 100;
+            if (mod10 === 1 && mod100 !== 11) return forms[0];
+            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return forms[1];
+            return forms[2];
+        }
+
+        function subtitleFor(match, isSeries) {
+            if (isSeries) {
+                var sCount = match.seasons ? match.seasons.length : 0;
+                var eCount = match.size || 0;
+                var s = sCount + ' ' + pluralize(sCount, ['сезон', 'сезона', 'сезонов']);
+                var e = eCount + ' ' + pluralize(eCount, ['серия', 'серии', 'серий']);
+                return 'DLNA · ' + s + ' · ' + e;
+            }
+            var entries = match;
+            if (entries.length === 1) {
+                var dur = entries[0].duration ? ('DLNA · ' + entries[0].duration) : 'DLNA';
+                return dur;
+            }
+            return 'DLNA · ' + entries.length + ' ' + pluralize(entries.length, ['файл', 'файла', 'файлов']);
+        }
+
+        function buildButton(match, isSeries, card) {
+            var subtitle = subtitleFor(match, isSeries);
+            // .full-start__button — нативный класс LAMPA (работает в обеих темах).
+            var btn = $('<div class="full-start__button selector view--dlna">' +
+                '<div class="full-start__button-tip" style="display:inline-flex;align-items:center;justify-content:center;width:1.5em;height:1.5em;margin-right:0.4em;vertical-align:-0.25em;">' + ICON_DLNA + '</div>' +
+                '<span>Смотреть с DLNA</span>' +
+                '<div class="full-start__button-subtitle" style="font-size:0.78em;opacity:0.7;margin-top:0.1em;">' + escapeHtml(subtitle) + '</div>' +
+            '</div>');
+            btn.on('hover:enter', function () { onClick(match, isSeries, card); });
+            return btn;
+        }
+
+        function onClick(match, isSeries, card) {
+            if (isSeries) {
+                Lampa.Activity.push({
+                    url: '',
+                    title: (card.name || card.original_name || 'Сериал') + ' · DLNA',
+                    component: 'keenetic_dlna_episodes',
+                    card: card,
+                    page: 1
+                });
+                return;
+            }
+            var entries = match;
+            if (entries.length === 1) {
+                playMovie(entries[0], card);
+                return;
+            }
+            // Несколько копий — Lampa.Select
+            var items = entries.map(function (e) {
+                var meta = (e.resolution || 'HD') + ' · ' + (e.size ? formatSize(e.size) : '');
+                return {
+                    title: meta.trim().replace(/ · $/, ''),
+                    subtitle: e.title,
+                    entry: e
+                };
+            });
+            if (Lampa.Select && Lampa.Select.show) {
+                Lampa.Select.show({
+                    title: 'Выбор файла',
+                    items: items,
+                    onSelect: function (item) { playMovie(item.entry, card); },
+                    onBack: function () { Lampa.Controller.toggle('full-start'); }
+                });
+            } else {
+                // Fallback: играем первый
+                playMovie(entries[0], card);
+            }
+        }
+
+        function tryInject(activity) {
+            try {
+                if (!activity || !activity.card) return;
+                var card = activity.card;
+                if (card.id == null) return;
+                var isSeries = card.method === 'tv' || card.name != null || card.number_of_seasons != null || card.first_air_date != null;
+                var match = isSeries ? IndexService.lookupSeries(card.id) : IndexService.lookupMovie(card.id);
+                if (!match) return;
+                if (isSeries && (!match.size)) return;
+
+                if (!activity.activity || typeof activity.activity.render !== 'function') return;
+                var rendered = activity.activity.render();
+                var container = rendered.find('.full-start-new__buttons').first();
+                if (!container.length) container = rendered.find('.full-start__buttons').first();
+                if (!container.length) return;
+
+                // Идемпотентность: повторный full:complite (например, возврат
+                // из Activity со списком серий) → убираем старую кнопку.
+                container.find('.view--dlna').remove();
+
+                var btn = buildButton(match, isSeries, card);
+                container.prepend(btn);
+
+                // Переиндексировать фокус в группе кнопок.
+                try {
+                    if (Lampa.Controller && Lampa.Controller.collectionSet) {
+                        Lampa.Controller.collectionSet(rendered);
+                    }
+                } catch (e) {}
+            } catch (e) {}
+        }
+
+        function refreshCurrent() {
+            try {
+                var active = Lampa.Activity.active();
+                if (active && active.component === 'full') tryInject(active);
+            } catch (e) {}
+        }
+
+        function init() {
+            if (!window.Lampa || !Lampa.Listener) return;
+            Lampa.Listener.follow('full', function (e) {
+                if (e.type === 'complite') tryInject(e.object);
+            });
+            Lampa.Listener.follow('dlna_index', function (e) {
+                if (e.type === 'ready' || e.type === 'updated') refreshCurrent();
+            });
+        }
+
+        return { init: init, tryInject: tryInject, refreshCurrent: refreshCurrent };
+    })();
+
     function injectStyles() {
         if (document.getElementById('keenetic-dlna-styles')) return;
         var style = document.createElement('style');
@@ -1459,6 +1596,7 @@
             // Warm: моментально из Storage; cold-quickCheck отложен,
             // чтобы не конкурировать со стартом LAMPA.
             try { IndexService.load(); } catch (e) {}
+            try { CardButton.init(); } catch (e) {}
             setTimeout(function () {
                 try { IndexService.quickCheck(); } catch (e) {}
             }, 2000);
