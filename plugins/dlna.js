@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.9.1';
+    var PLUGIN_VERSION = '0.9.2';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -1711,12 +1711,32 @@
         var TORRENT_COMPONENTS = ['torrents', 'online', 'lampac_online'];
         var installed = false;
 
+        function isDebug() {
+            try { return !!Lampa.Storage.field('transmission_debug'); }
+            catch (e) { return false; }
+        }
+
         function isTorrentContext() {
             try {
                 var a = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
                 if (!a || !a.component) return false;
                 return TORRENT_COMPONENTS.indexOf(a.component) >= 0;
             } catch (e) { return false; }
+        }
+
+        function debugReport(params) {
+            try {
+                var a = (Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active()) || {};
+                var comp = a.component || 'unknown';
+                var items = (params && params.items) || [];
+                var info = extractTorrentInfo(params || {});
+                var msg = '[t-debug] comp=' + comp + ' items=' + items.length +
+                          ' magnet=' + (info ? 'YES' : 'NO');
+                console.warn(msg, { params: params, activity: a });
+                if (Lampa.Noty) Lampa.Noty.show(msg);
+            } catch (e) {
+                try { console.warn('[t-debug] report failed', e); } catch (_) {}
+            }
         }
 
         function makeItem(info) {
@@ -1755,6 +1775,7 @@
 
         function wrap(params) {
             try {
+                if (isDebug()) debugReport(params);
                 if (!isTorrentContext()) return params;
                 var info = extractTorrentInfo(params);
                 if (!info) return params;
@@ -1908,6 +1929,14 @@
                             }
                             Lampa.Noty.show(msg);
                         });
+                }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: 'transmission_debug', type: 'trigger', default: false },
+                field: {
+                    name: 'Debug Transmission',
+                    description: 'Показывать Noty при каждом Select.show с component-именем и наличием magnet. Для диагностики — обычно выключено.'
                 }
             });
         }
