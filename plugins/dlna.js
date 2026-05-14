@@ -1850,6 +1850,64 @@
                     if (window.Lampa && Lampa.Noty) Lampa.Noty.show('DLNA: обновление индекса запущено');
                 }
             });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_TR_ADDR, type: 'input', placeholder: DEFAULT_TR_ADDR, values: '', default: DEFAULT_TR_ADDR },
+                field: {
+                    name: 'Transmission RPC',
+                    description: 'IP:порт RPC встроенного Transmission Кинетика. По умолчанию 8090; если в web-UI Кинетика порт другой — задай вручную.'
+                },
+                onChange: function () { try { TransmissionClient._resetSession(); } catch (e) {} }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_TR_USER, type: 'input', placeholder: DEFAULT_TR_USER, values: '', default: DEFAULT_TR_USER },
+                field: { name: 'Пользователь Transmission', description: 'Логин из web-UI Кинетика → Transmission.' }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_TR_PASS, type: 'input', placeholder: '', values: '', default: '' },
+                field: {
+                    name: 'Пароль Transmission',
+                    description: 'Пароль из web-UI Кинетика. Хранится в LAMPA в открытом виде — не используй критичные пароли. Если пустой — basic-auth не отправляется.'
+                },
+                onChange: function () { try { TransmissionClient._resetSession(); } catch (e) {} }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: STORAGE_TR_DIR, type: 'input', placeholder: '', values: '', default: '' },
+                field: {
+                    name: 'Папка скачивания (опц.)',
+                    description: 'Если пусто — Transmission кладет в свою default-папку, заданную в web-UI Кинетика. Если задано — передается как download-dir.'
+                }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'keenetic_dlna',
+                param: { name: 'transmission_test', type: 'trigger', default: false },
+                field: {
+                    name: 'Тест соединения с Transmission',
+                    description: 'session-stats → Noty с результатом.'
+                },
+                onChange: function () {
+                    try { Lampa.Storage.set('transmission_test', false); } catch (e) {}
+                    if (window.Lampa && Lampa.Noty) Lampa.Noty.show('Проверяю Transmission…');
+                    TransmissionClient.ping(
+                        function (info) {
+                            var n = info.torrentCount;
+                            Lampa.Noty.show('Transmission OK · торрентов: ' + (typeof n === 'number' ? n : '?'));
+                        },
+                        function (err) {
+                            var msg;
+                            switch (err.reason) {
+                                case 'auth':    msg = 'Неверный логин/пароль'; break;
+                                case 'network': msg = 'Не достучался до RPC'; break;
+                                case 'rpc':     msg = 'RPC: ' + (err.message || 'ошибка'); break;
+                                default:        msg = 'Ошибка: ' + (err.reason || 'неизвестно');
+                            }
+                            Lampa.Noty.show(msg);
+                        });
+                }
+            });
         }
 
         function addMenu() {
