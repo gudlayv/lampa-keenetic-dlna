@@ -85,7 +85,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
-        skip = {"host", "connection", "content-length", "origin", "referer"}
+        # cookie скипаем явно — иначе LAMPA-домен мог бы случайно
+        # пробросить свои сессионки на upstream DLNA/Transmission.
+        skip = {"host", "connection", "content-length", "origin", "referer", "cookie"}
         forward_headers = {}
         for k, v in self.headers.items():
             if k.lower() in skip:
