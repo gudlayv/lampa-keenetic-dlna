@@ -38,8 +38,9 @@ def _parse_allow(s):
     return out
 
 
-# Дефолт — только MiniDLNA на Кинетике. Остальные хосты блокируются.
-ALLOWED_HOSTS = _parse_allow(os.environ.get("DLNA_PROXY_ALLOW", "192.168.1.1:8200"))
+# Дефолт: MiniDLNA + встроенный Transmission Кинетика. Через DLNA_PROXY_ALLOW
+# пользователь может изменить порты (например если Transmission на :8091).
+ALLOWED_HOSTS = _parse_allow(os.environ.get("DLNA_PROXY_ALLOW", "192.168.1.1:8200,192.168.1.1:8090"))
 
 
 def host_allowed(target_url):
@@ -64,7 +65,8 @@ class Handler(BaseHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, SOAPAction")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, SOAPAction, Authorization, X-Transmission-Session-Id")
+        self.send_header("Access-Control-Expose-Headers", "X-Transmission-Session-Id")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
