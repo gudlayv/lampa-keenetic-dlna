@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.9.2';
+    var PLUGIN_VERSION = '0.9.3';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -1695,6 +1695,51 @@
             if (m) magnet = m[0];
         }
 
+        // Стратегия 3: focused DOM-element торрент-раздачи. LAMPA-онлайн хранит
+        // magnet в data(...) на самом .selector списка раздач, а context-меню
+        // (Select.show) этого magnet не передаёт.
+        if (!magnet && typeof $ !== 'undefined') {
+            try {
+                var focused = $('.selector.focus').last();
+                if (focused.length) {
+                    var data = (focused.data && focused.data()) || {};
+                    var raw = focused[0];
+                    // Пробуем data-fields, потом raw DOM-property (LAMPA иногда
+                    // вешает объект прямо на element[0].torrent).
+                    var candidates = [
+                        data.torrent, data.item, data.element, data.card,
+                        raw && raw.torrent, raw && raw.item, raw && raw.element
+                    ];
+                    for (var ci = 0; ci < candidates.length; ci++) {
+                        var c = candidates[ci];
+                        if (!c || typeof c !== 'object') continue;
+                        var fields = [c.magnet, c.MagnetUri, c.Link, c.link, c.url, c.torrent_url];
+                        for (var fi = 0; fi < fields.length; fi++) {
+                            if (typeof fields[fi] === 'string' && /^magnet:\?/.test(fields[fi])) {
+                                magnet = fields[fi];
+                                if (typeof c.Title === 'string')   name = c.Title;
+                                else if (typeof c.title === 'string') name = c.title;
+                                if (typeof c.Seeders === 'number')  seeds = c.Seeders;
+                                else if (typeof c.seeds === 'number') seeds = c.seeds;
+                                break;
+                            }
+                        }
+                        if (magnet) break;
+                    }
+                    // Самый общий fallback — JSON.stringify(focused data) + regex.
+                    if (!magnet) {
+                        try {
+                            var allBlob = JSON.stringify(data) + ' ' + JSON.stringify({
+                                t: raw && raw.torrent, i: raw && raw.item
+                            });
+                            var mf = allBlob.match(/magnet:\?xt=urn:btih:[A-Fa-f0-9]+[^"\s]*/);
+                            if (mf) magnet = mf[0];
+                        } catch (e) {}
+                    }
+                }
+            } catch (e) {}
+        }
+
         if (!magnet) return null;
 
         // Сиды — best-effort, для subtitle.
@@ -1734,6 +1779,32 @@
                           ' magnet=' + (info ? 'YES' : 'NO');
                 console.warn(msg, { params: params, activity: a });
                 if (Lampa.Noty) Lampa.Noty.show(msg);
+
+                // Дамп фокусного DOM-элемента: какие ключи доступны и есть ли
+                // там что-то похожее на magnet — для подбора стратегии extract.
+                try {
+                    var focused = (typeof $ !== 'undefined') ? $('.selector.focus').last() : null;
+                    if (focused && focused.length) {
+                        var data = (focused.data && focused.data()) || {};
+                        var keys = Object.keys(data);
+                        var raw = focused[0] || {};
+                        var rawKeys = [];
+                        if (raw.torrent) rawKeys.push('raw.torrent');
+                        if (raw.item)    rawKeys.push('raw.item');
+                        if (raw.element) rawKeys.push('raw.element');
+                        var snapshot = JSON.stringify(data).slice(0, 200);
+                        var hasMagnet = /magnet:\?xt=urn:btih:/i.test(snapshot);
+                        var dmsg = '[t-debug] focused data=[' + keys.join(',') + ']' +
+                                   (rawKeys.length ? ' rawProps=[' + rawKeys.join(',') + ']' : '') +
+                                   ' hasMagnet=' + (hasMagnet ? 'YES' : 'NO');
+                        console.warn(dmsg, { focusedData: data, raw: raw });
+                        if (Lampa.Noty) Lampa.Noty.show(dmsg);
+                    } else if (Lampa.Noty) {
+                        Lampa.Noty.show('[t-debug] focused: not found');
+                    }
+                } catch (e2) {
+                    try { console.warn('[t-debug] focused-dump failed', e2); } catch (_) {}
+                }
             } catch (e) {
                 try { console.warn('[t-debug] report failed', e); } catch (_) {}
             }
