@@ -22,6 +22,7 @@
     var STORAGE_TR_USER  = 'transmission_user';
     var STORAGE_TR_PASS  = 'transmission_pass';
     var STORAGE_TR_DIR   = 'transmission_dir';
+    var STORAGE_TR_TEST  = 'transmission_test';
     var DEFAULT_TR_ADDR  = '192.168.1.1:8090';
     var DEFAULT_TR_USER  = 'admin';
 
@@ -1862,7 +1863,8 @@
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
                 param: { name: STORAGE_TR_USER, type: 'input', placeholder: DEFAULT_TR_USER, values: '', default: DEFAULT_TR_USER },
-                field: { name: 'Пользователь Transmission', description: 'Логин из web-UI Кинетика → Transmission.' }
+                field: { name: 'Пользователь Transmission', description: 'Логин из web-UI Кинетика → Transmission.' },
+                onChange: function () { try { TransmissionClient._resetSession(); } catch (e) {} }
             });
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
@@ -1883,13 +1885,13 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
-                param: { name: 'transmission_test', type: 'trigger', default: false },
+                param: { name: STORAGE_TR_TEST, type: 'trigger', default: false },
                 field: {
                     name: 'Тест соединения с Transmission',
                     description: 'session-stats → Noty с результатом.'
                 },
                 onChange: function () {
-                    try { Lampa.Storage.set('transmission_test', false); } catch (e) {}
+                    try { Lampa.Storage.set(STORAGE_TR_TEST, false); } catch (e) {}
                     if (window.Lampa && Lampa.Noty) Lampa.Noty.show('Проверяю Transmission…');
                     TransmissionClient.ping(
                         function (info) {
