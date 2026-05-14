@@ -217,16 +217,34 @@
         return { title: name.replace(/[._]+/g, ' ').trim(), year: null };
     }
 
+    // Срезаем release-group тег вида "[NovaFilm] " в начале и нормализуем разделители.
+    function cleanShow(s) {
+        return String(s || '').replace(/^\[[^\]]+\][\s._\-]*/, '').replace(/[._]+/g, ' ').trim();
+    }
+
     // Парсим эпизод: SxxExx или 1x03. Возвращает {show, season, episode} или null.
+    // Покрытые форматы:
+    //   "Show.Name.S01E03.mkv"          → show="Show Name", s=1, e=3
+    //   "Show Name 1x03.mkv"            → show="Show Name", s=1, e=3
+    //   "[NovaFilm] Show.Name.S01E03"   → tag срезается, show="Show Name"
+    //   "S01E03 - Title.mkv"            → show="Title" (suffix как имя)
+    //   "S01E03.mkv"                    → show="" (попадет в группу с пустым именем)
     function parseEpisode(name) {
         name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        // Стандартный случай: префикс с именем шоу + SxxExx
         var m = name.match(/^(.+?)[._\s\-]+S(\d{1,2})[._\s\-]?E(\d{1,3})/i);
         if (m) {
-            return { show: m[1].replace(/[._]+/g, ' ').trim(), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+            return { show: cleanShow(m[1]), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
         }
         m = name.match(/^(.+?)[._\s\-]+(\d{1,2})x(\d{1,3})\b/i);
         if (m) {
-            return { show: m[1].replace(/[._]+/g, ' ').trim(), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+            return { show: cleanShow(m[1]), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+        }
+        // Без префикса: "S01E03[ - Title].mkv". Без такого fallback'a файлы
+        // вида "S01E03.mkv" уходили в "Фильмы" — теперь группируются.
+        m = name.match(/^S(\d{1,2})[._\s\-]?E(\d{1,3})(?:[._\s\-]+(.+))?$/i);
+        if (m) {
+            return { show: cleanShow(m[3] || ''), season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
         }
         return null;
     }
