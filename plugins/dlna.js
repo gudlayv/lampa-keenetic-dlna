@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.9.3';
+    var PLUGIN_VERSION = '0.9.4';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -1667,6 +1667,25 @@
         };
     })();
 
+    // Последняя раздача, на которой пользователь сделал long-press в торрент-списке.
+    // LAMPA-source шлёт Lampa.Listener.send('torrent', { type: 'onlong', element, ... })
+    // прямо перед Select.show — мы запоминаем element и используем его при инжекте.
+    var lastTorrentElement = null;
+
+    function bindTorrentListener() {
+        try {
+            if (!window.Lampa || !Lampa.Listener || typeof Lampa.Listener.follow !== 'function') return;
+            Lampa.Listener.follow('torrent', function (e) {
+                if (!e) return;
+                if (e.type === 'onlong' && e.element) {
+                    lastTorrentElement = e.element;
+                } else if (e.type === 'onenter' && e.element) {
+                    lastTorrentElement = e.element;
+                }
+            });
+        } catch (e) {}
+    }
+
     // Извлечение magnet и человеко-читаемого имени из контекстного меню
     // торрент-раздачи. Структура items различается между online-источниками,
     // поэтому пробуем несколько fallback-стратегий.
@@ -1675,6 +1694,20 @@
         var magnet = null;
         var name = (params.title || '').toString();
         var seeds = 0;
+
+        // Стратегия 0 (приоритет): сохранённый element из Lampa.Listener('torrent').
+        // LAMPA-компонент torrents шлёт onlong-событие перед Select.show.
+        if (lastTorrentElement) {
+            var el = lastTorrentElement;
+            var c = el.MagnetUri || el.Link || el.magnet || el.link;
+            if (typeof c === 'string' && /^magnet:\?/.test(c)) {
+                magnet = c;
+                if (typeof el.Title === 'string') name = el.Title;
+                else if (typeof el.title === 'string') name = el.title;
+                if (typeof el.Seeders === 'number') seeds = el.Seeders;
+                else if (typeof el.seeds === 'number') seeds = el.seeds;
+            }
+        }
 
         // Стратегия 1: явное поле в каком-то item.
         for (var i = 0; i < params.items.length; i++) {
@@ -2042,6 +2075,7 @@
             try { IndexService.load(); } catch (e) {}
             try { CardButton.init(); } catch (e) {}
             try { TransmissionAddon.install(); } catch (e) {}
+            try { bindTorrentListener(); } catch (e) {}
             setTimeout(function () {
                 try { IndexService.quickCheck(); } catch (e) {}
                 try { TransmissionAddon.install(); } catch (e) {}  // retry если Lampa.Select не был готов
