@@ -1682,7 +1682,7 @@
             if (typeof candidate === 'string' && /^magnet:\?/.test(candidate)) {
                 magnet = candidate; break;
             }
-            if (it._torrent && typeof it._torrent.magnet === 'string') {
+            if (it._torrent && typeof it._torrent.magnet === 'string' && /^magnet:\?/.test(it._torrent.magnet)) {
                 magnet = it._torrent.magnet; break;
             }
         }
