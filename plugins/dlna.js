@@ -1874,10 +1874,13 @@
 
     // Извлечение magnet и человеко-читаемого имени из контекстного меню
     // торрент-раздачи. Структура items различается между online-источниками,
-    // поэтому пробуем несколько fallback-стратегий.
+    // поэтому пробуем несколько fallback-стратегий. Возвращает strategy:
+    // 'listener' | 'item-field' | 'item-regex' | 'dom-field' | 'dom-regex'
+    // — для telemetry в debug Noty (понять что ломается при апдейте LAMPA).
     function extractTorrentInfo(params) {
         if (!params || !Array.isArray(params.items)) return null;
         var magnet = null;
+        var strategy = null;
         var name = (params.title || '').toString();
         var seeds = 0;
 
@@ -1887,7 +1890,7 @@
             var el = lastTorrentElement;
             var c = el.MagnetUri || el.Link || el.magnet || el.link;
             if (typeof c === 'string' && /^magnet:\?/.test(c)) {
-                magnet = c;
+                magnet = c; strategy = 'listener';
                 if (typeof el.Title === 'string') name = el.Title;
                 else if (typeof el.title === 'string') name = el.title;
                 if (typeof el.Seeders === 'number') seeds = el.Seeders;
@@ -1896,14 +1899,16 @@
         }
 
         // Стратегия 1: явное поле в каком-то item.
-        for (var i = 0; i < params.items.length; i++) {
-            var it = params.items[i] || {};
-            var candidate = it.magnet || it.MagnetUri || it.link || it.url;
-            if (typeof candidate === 'string' && /^magnet:\?/.test(candidate)) {
-                magnet = candidate; break;
-            }
-            if (it._torrent && typeof it._torrent.magnet === 'string' && /^magnet:\?/.test(it._torrent.magnet)) {
-                magnet = it._torrent.magnet; break;
+        if (!magnet) {
+            for (var i = 0; i < params.items.length; i++) {
+                var it = params.items[i] || {};
+                var candidate = it.magnet || it.MagnetUri || it.link || it.url;
+                if (typeof candidate === 'string' && /^magnet:\?/.test(candidate)) {
+                    magnet = candidate; strategy = 'item-field'; break;
+                }
+                if (it._torrent && typeof it._torrent.magnet === 'string' && /^magnet:\?/.test(it._torrent.magnet)) {
+                    magnet = it._torrent.magnet; strategy = 'item-field'; break;
+                }
             }
         }
 
@@ -1911,7 +1916,7 @@
         if (!magnet) {
             var blob = name + ' ' + JSON.stringify(params.items);
             var m = blob.match(/magnet:\?xt=urn:btih:[A-Fa-f0-9]+[^"\s]*/);
-            if (m) magnet = m[0];
+            if (m) { magnet = m[0]; strategy = 'item-regex'; }
         }
 
         // Стратегия 3: focused DOM-element торрент-раздачи. LAMPA-онлайн хранит
@@ -1935,7 +1940,7 @@
                         var fields = [c.magnet, c.MagnetUri, c.Link, c.link, c.url, c.torrent_url];
                         for (var fi = 0; fi < fields.length; fi++) {
                             if (typeof fields[fi] === 'string' && /^magnet:\?/.test(fields[fi])) {
-                                magnet = fields[fi];
+                                magnet = fields[fi]; strategy = 'dom-field';
                                 if (typeof c.Title === 'string')   name = c.Title;
                                 else if (typeof c.title === 'string') name = c.title;
                                 if (typeof c.Seeders === 'number')  seeds = c.Seeders;
@@ -1952,7 +1957,7 @@
                                 t: raw && raw.torrent, i: raw && raw.item
                             });
                             var mf = allBlob.match(/magnet:\?xt=urn:btih:[A-Fa-f0-9]+[^"\s]*/);
-                            if (mf) magnet = mf[0];
+                            if (mf) { magnet = mf[0]; strategy = 'dom-regex'; }
                         } catch (e) {}
                     }
                 }
@@ -1965,7 +1970,7 @@
         var seedsMatch = JSON.stringify(params.items).match(/"?seeds"?\s*:\s*(\d+)/i);
         if (seedsMatch) seeds = parseInt(seedsMatch[1], 10);
 
-        return { magnet: magnet, name: name || 'торрент', seeds: seeds };
+        return { magnet: magnet, name: name || 'торрент', seeds: seeds, strategy: strategy };
     }
 
     // Override Lampa.Select.show для инжекта «Скачать на Кинетик» в context-меню
@@ -1995,7 +2000,8 @@
                 var items = (params && params.items) || [];
                 var info = extractTorrentInfo(params || {});
                 var msg = '[t-debug] comp=' + comp + ' items=' + items.length +
-                          ' magnet=' + (info ? 'YES' : 'NO');
+                          ' magnet=' + (info ? 'YES' : 'NO') +
+                          (info && info.strategy ? ' via=' + info.strategy : '');
                 console.warn(msg, { params: params, activity: a });
                 if (Lampa.Noty) Lampa.Noty.show(msg);
 
@@ -2058,7 +2064,7 @@
                         case 'parse':     msg = 'Некорректный ответ Transmission'; break;
                         default:          msg = 'Ошибка: ' + (err.reason || 'неизвестно');
                     }
-                    console.warn('[transmission]', err);
+                    if (isDebug()) console.warn('[transmission]', err);
                     Lampa.Noty.show(msg);
                 });
         }
@@ -2085,7 +2091,7 @@
                 };
                 return params;
             } catch (e) {
-                console.warn('[transmission] wrap failed', e);
+                if (isDebug()) console.warn('[transmission] wrap failed', e);
                 return params;
             }
         }
