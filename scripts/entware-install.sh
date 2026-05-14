@@ -24,7 +24,7 @@ set -e
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/gudlayv/lampa-keenetic-dlna/main}"
 INSTALL_DIR=/opt/lampa-keenetic-dlna
 PORT="${PORT:-8780}"
-DLNA_PROXY_ALLOW="${DLNA_PROXY_ALLOW:-192.168.1.1:8200}"
+DLNA_PROXY_ALLOW="${DLNA_PROXY_ALLOW:-192.168.1.1:8200,192.168.1.1:8090}"
 
 USE_TUNNEL=0
 for arg in "$@"; do
