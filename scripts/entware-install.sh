@@ -129,8 +129,16 @@ start() {
 }
 
 stop() {
-    pkill -f "python3 .*serve.py" 2>/dev/null
-    pkill -f "cloudflared tunnel" 2>/dev/null
+    # BusyBox pkill -f молча не убивает процесс на некоторых сборках Кинетика —
+    # ищем PID через pgrep и kill'аем напрямую с fallback на SIGKILL.
+    for pat in "python3 .*serve.py" "cloudflared tunnel"; do
+        for sig in TERM KILL; do
+            PIDS=\$(pgrep -f "\$pat" 2>/dev/null)
+            [ -z "\$PIDS" ] && break
+            kill -\$sig \$PIDS 2>/dev/null
+            sleep 1
+        done
+    done
     rm -f /var/run/lampa-dlna.pid
 }
 
