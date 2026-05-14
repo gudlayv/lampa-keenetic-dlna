@@ -188,13 +188,32 @@
     }
 
     // TMDB search через API ключ LAMPA. type: 'movie' | 'tv'
-    var tmdbCache = {};
+    // Кеши с soft-LRU (FIFO eviction): на крупной библиотеке без cap'a
+    // словари растут безгранично пока вкладка жива.
+    var TMDB_CACHE_MAX = 500;
+    var tmdbCache = Object.create(null);
+    var tmdbCacheOrder = [];
+    function tmdbCachePut(key, val) {
+        if (!(key in tmdbCache)) {
+            tmdbCacheOrder.push(key);
+            if (tmdbCacheOrder.length > TMDB_CACHE_MAX) {
+                var evict = tmdbCacheOrder.shift();
+                delete tmdbCache[evict];
+            }
+        }
+        tmdbCache[key] = val;
+    }
+    // Дедуп параллельных запросов с одинаковым ключом — иначе при первом
+    // рендере страницы 2-3 строки одного сериала шлют один и тот же запрос.
+    var tmdbInflight = Object.create(null);
     function tmdbSearch(title, year, type, cb) {
         if (typeof type === 'function') { cb = type; type = 'movie'; }
         type = type || 'movie';
         var key = type + '|' + title + '|' + (year || '');
-        if (tmdbCache[key]) { cb(tmdbCache[key]); return; }
+        if (key in tmdbCache) { cb(tmdbCache[key]); return; }
+        if (tmdbInflight[key]) { tmdbInflight[key].push(cb); return; }
         if (!window.Lampa || !Lampa.TMDB) { cb(null); return; }
+        tmdbInflight[key] = [cb];
         var qParam = type === 'tv' ? '&first_air_date_year=' : '&year=';
         var url = Lampa.TMDB.api('search/' + type + '?api_key=' + Lampa.TMDB.key() +
             '&language=ru&query=' + encodeURIComponent(title) +
@@ -202,11 +221,16 @@
             '&include_adult=false');
         var network = new Lampa.Reguest();
         network.timeout(10000);
+        function flush(hit) {
+            var subs = tmdbInflight[key] || [];
+            delete tmdbInflight[key];
+            subs.forEach(function (s) { try { s(hit); } catch (e) {} });
+        }
         network.silent(url, function (data) {
             var hit = (data && data.results && data.results[0]) || null;
-            tmdbCache[key] = hit;
-            cb(hit);
-        }, function () { cb(null); });
+            tmdbCachePut(key, hit);
+            flush(hit);
+        }, function () { flush(null); });
     }
 
     function tmdbPosterUrl(posterPath, size) {
@@ -215,15 +239,27 @@
     }
 
     // Получить мету сезона: episodes с name, overview, still_path, vote_average
-    var tmdbSeasonCache = {};
+    var TMDB_SEASON_CACHE_MAX = 200;
+    var tmdbSeasonCache = Object.create(null);
+    var tmdbSeasonCacheOrder = [];
+    function tmdbSeasonCachePut(key, val) {
+        if (!(key in tmdbSeasonCache)) {
+            tmdbSeasonCacheOrder.push(key);
+            if (tmdbSeasonCacheOrder.length > TMDB_SEASON_CACHE_MAX) {
+                var evict = tmdbSeasonCacheOrder.shift();
+                delete tmdbSeasonCache[evict];
+            }
+        }
+        tmdbSeasonCache[key] = val;
+    }
     function tmdbSeason(seriesId, seasonNumber, cb) {
         var key = seriesId + ':s' + seasonNumber;
-        if (tmdbSeasonCache[key]) { cb(tmdbSeasonCache[key]); return; }
+        if (key in tmdbSeasonCache) { cb(tmdbSeasonCache[key]); return; }
         var url = Lampa.TMDB.api('tv/' + seriesId + '/season/' + seasonNumber + '?api_key=' + Lampa.TMDB.key() + '&language=ru');
         var network = new Lampa.Reguest();
         network.timeout(10000);
         network.silent(url, function (data) {
-            tmdbSeasonCache[key] = data;
+            tmdbSeasonCachePut(key, data);
             cb(data);
         }, function () { cb(null); });
     }
@@ -341,6 +377,12 @@
     var INDEX_STORAGE_KEY = 'dlna_index_v1';
     var INDEX_VERSION = 1;
     var INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    // localStorage origin-quota обычно 5MB. На крупной DLNA-библиотеке
+    // (5000+ файлов) сериализованный snapshot (entries + URL-карты)
+    // легко перевалит, Lampa.Storage.set молча отвалится в catch — стухший
+    // кеш сидит forever. Этот лимит — soft warning при оверхеде; индекс
+    // продолжит работать в памяти, но persist отключаем.
+    var INDEX_PERSIST_MAX_BYTES = 4 * 1024 * 1024; // 4MB запас от 5MB квоты
 
     var IndexService = (function () {
         var listeners = { ready: [], updated: [], error: [] };
@@ -407,6 +449,7 @@
             return { byMovieId: byMovie, bySeriesId: bySeries };
         }
 
+        var persistOversizeWarned = false;
         function persist() {
             try {
                 if (!window.Lampa || !Lampa.Storage) return;
@@ -421,14 +464,28 @@
                     Object.keys(m).forEach(function (k) { if (m[k].url) out[k] = m[k].url; });
                     series[id] = out;
                 });
-                Lampa.Storage.set(INDEX_STORAGE_KEY, {
+                var snapshot = {
                     version: INDEX_VERSION,
                     ts: state.ts,
                     addr: state.addr,
                     entries: state.allEntries,
                     movies: movies,
                     series: series
-                });
+                };
+                // Estimate size заранее: stringify дешевле чем уйти в catch
+                // и оставить старый снапшот после QuotaExceeded.
+                var bytes = JSON.stringify(snapshot).length;
+                if (bytes > INDEX_PERSIST_MAX_BYTES) {
+                    if (!persistOversizeWarned && window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('DLNA: индекс ' + Math.round(bytes / 1024 / 1024) + 'MB, кеш отключен (работаем in-memory)');
+                        persistOversizeWarned = true;
+                    }
+                    // Чистим возможный старый снапшот меньшего размера —
+                    // он был валидным при меньшей библиотеке, теперь устарел.
+                    try { Lampa.Storage.set(INDEX_STORAGE_KEY, ''); } catch (e) {}
+                    return;
+                }
+                Lampa.Storage.set(INDEX_STORAGE_KEY, snapshot);
             } catch (e) {}
         }
 
@@ -436,7 +493,13 @@
             try {
                 if (!window.Lampa || !Lampa.Storage) return;
                 var snap = Lampa.Storage.get(INDEX_STORAGE_KEY, '');
-                if (!snap || typeof snap !== 'object' || snap.version !== INDEX_VERSION) return;
+                if (!snap || typeof snap !== 'object') return;
+                if (snap.version !== INDEX_VERSION) {
+                    // Стухший снапшот другой версии — чистим явно, иначе
+                    // мусор сидит forever и ест квоту.
+                    try { Lampa.Storage.set(INDEX_STORAGE_KEY, ''); } catch (e) {}
+                    return;
+                }
                 if (snap.addr && snap.addr !== dlnaAddr()) return; // адрес сменился — кеш не валиден
                 state.allEntries = Array.isArray(snap.entries) ? snap.entries : [];
                 var maps = rebuildMaps(state.allEntries, snap.movies || {}, snap.series || {});
@@ -579,6 +642,13 @@
             state.status = 'loading';
             inflight = true;
             var fn = opts.full ? doFullRefresh : doQuickCheck;
+            // ВАЖНО: doFullRefresh/doQuickCheck должны вызывать done строго
+            // асинхронно (через runPool/sweepBrowse). Иначе inflight=null
+            // ниже выполнится ПОСЛЕ done — и synchronous callback внутри fn
+            // увидит inflight=true и получит 'busy'. Сейчас runPool на пустом
+            // списке зовет cb синхронно, но переменная state.status уже
+            // 'loading' к моменту fn(), так что регрессии нет — но любая
+            // будущая sync-ветка должна оборачиваться в setTimeout(0).
             fn(function (err) {
                 inflight = null;
                 if (err && state.status !== 'ready') {
