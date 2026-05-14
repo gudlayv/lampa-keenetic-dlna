@@ -4,6 +4,17 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
+    // Polyfill: String.prototype.padStart — ES2017, отсутствует на Tizen 4
+    // (WebKit ~537). Используется для S01E03-префиксов в трех местах ниже.
+    if (!String.prototype.padStart) {
+        String.prototype.padStart = function (len, pad) {
+            var s = String(this);
+            pad = String(pad == null ? ' ' : pad);
+            while (s.length < len) s = pad + s;
+            return s.length > len ? s.slice(s.length - len) : s;
+        };
+    }
+
     var PLUGIN_VERSION = '0.9.5';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
