@@ -78,7 +78,12 @@
             '<rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>' +
         '</svg>';
 
-    function browse(objectId, success, error) {
+    var BROWSE_PAGE = 500;
+    var BROWSE_HARD_CAP = 50000; // защита от бесконечного цикла на кривом DLNA
+
+    // Один SOAP Browse-запрос с произвольным StartingIndex/RequestedCount.
+    // Возвращает {entries, numberReturned, totalMatches}.
+    function browsePage(objectId, startingIndex, requestedCount, success, error) {
         var proxy = proxyBase();
         if (!proxy) {
             error({ status: 0, message: 'no_proxy' });
@@ -91,8 +96,8 @@
             '<ObjectID>' + escapeHtml(objectId) + '</ObjectID>' +
             '<BrowseFlag>BrowseDirectChildren</BrowseFlag>' +
             '<Filter>*</Filter>' +
-            '<StartingIndex>0</StartingIndex>' +
-            '<RequestedCount>1000</RequestedCount>' +
+            '<StartingIndex>' + startingIndex + '</StartingIndex>' +
+            '<RequestedCount>' + requestedCount + '</RequestedCount>' +
             '<SortCriteria></SortCriteria>' +
             '</u:Browse></s:Body></s:Envelope>';
 
@@ -116,6 +121,39 @@
         });
     }
 
+    // Пагинированный Browse: повторяет browsePage пока NumberReturned > 0
+    // и общая длина < TotalMatches. На библиотеках >1000 файлов без этого
+    // терялся хвост (MiniDLNA отдает максимум RequestedCount за раз).
+    function browse(objectId, success, error) {
+        var all = [];
+        var totalMatches = null;
+        function step(start) {
+            if (all.length >= BROWSE_HARD_CAP) {
+                console.warn('[dlna] browse hit hard cap', BROWSE_HARD_CAP);
+                success(all);
+                return;
+            }
+            browsePage(objectId, start, BROWSE_PAGE, function (page) {
+                var entries = page.entries || [];
+                if (totalMatches === null) totalMatches = page.totalMatches;
+                for (var i = 0; i < entries.length; i++) all.push(entries[i]);
+                var nr = page.numberReturned;
+                // Стоп: пустая страница, не дотягиваем requested, или знаем total.
+                if (!nr || nr < BROWSE_PAGE || (totalMatches > 0 && all.length >= totalMatches)) {
+                    success(all);
+                    return;
+                }
+                step(start + nr);
+            }, function (err) {
+                // Если первая страница упала — наверх как ошибка.
+                // Если упали на 2-й+ — отдадим что собрали, лучше частично чем пусто.
+                if (all.length === 0) error(err);
+                else { console.warn('[dlna] browse page failed at start=' + start, err); success(all); }
+            });
+        }
+        step(0);
+    }
+
     function parseBrowseResponse(xmlDoc) {
         var resultEl = xmlDoc.getElementsByTagName('Result')[0];
         if (!resultEl) throw new Error('no <Result>');
@@ -126,7 +164,13 @@
         for (var i = 0; i < containers.length; i++) entries.push(parseNode(containers[i], 'container'));
         var items = didl.getElementsByTagName('item');
         for (var i = 0; i < items.length; i++) entries.push(parseNode(items[i], 'item'));
-        return entries;
+        var numEl = xmlDoc.getElementsByTagName('NumberReturned')[0];
+        var totEl = xmlDoc.getElementsByTagName('TotalMatches')[0];
+        return {
+            entries: entries,
+            numberReturned: numEl ? parseInt(numEl.textContent, 10) : entries.length,
+            totalMatches: totEl ? parseInt(totEl.textContent, 10) : 0
+        };
     }
 
     function parseNode(node, kind) {
