@@ -163,7 +163,7 @@ if (params3.items.filter(function (i) { return i._kt_send; }).length !== 1) {
 }
 console.log('OK: идемпотентность wrap.');
 
-// --- Test 4: оригинальный onSelect вызывается для не-наших items ---
+// --- Test 4: проброс onSelect — для не-наших items вызывается, для наших — нет ---
 Lampa.Activity._active = { component: 'torrents' };
 let origCalled = false;
 const params4 = {
@@ -178,7 +178,14 @@ if (!origCalled) {
     console.error('FAIL: оригинальный onSelect должен дергаться для не-наших items');
     process.exit(1);
 }
-console.log('OK: проброс оригинального onSelect для не-наших items.');
+// Симулируем выбор НАШЕГО пункта (_kt_send:true) — оригинальный onSelect НЕ должен дергаться
+origCalled = false;
+params4.onSelect({ title: 'Скачать на Кинетик', _kt_send: true, _kt_info: { magnet: 'magnet:?xt=urn:btih:abc', name: 'x' } });
+if (origCalled) {
+    console.error('FAIL: оригинальный onSelect НЕ должен дергаться для _kt_send items');
+    process.exit(1);
+}
+console.log('OK: проброс onSelect — для не-наших items вызывается, для наших — нет.');
 
 // --- Test 5: regex-fallback извлечения magnet ---
 Lampa.Activity._active = { component: 'torrents' };
