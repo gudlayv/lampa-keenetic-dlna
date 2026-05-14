@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.9.0';
+    var PLUGIN_VERSION = '0.9.1';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -1811,13 +1811,13 @@
             if (!Lampa.SettingsApi) return;
             Lampa.SettingsApi.addComponent({
                 component: 'keenetic_dlna',
-                name: 'Keenetic DLNA',
+                name: 'Keenetic DLNA v' + PLUGIN_VERSION,
                 icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><polygon points="10 9 16 12 10 15" fill="currentColor"/></svg>'
             });
             Lampa.SettingsApi.addParam({
                 component: 'keenetic_dlna',
                 param: { name: STORAGE_DLNA_ADDR, type: 'input', placeholder: '192.168.1.1:8200', values: '', default: DEFAULT_DLNA_ADDR },
-                field: { name: 'Адрес DLNA-сервера', description: 'IP:порт MiniDLNA на Кинетике. По умолчанию 192.168.1.1:8200.' },
+                field: { name: 'Адрес DLNA-сервера', description: 'Плагин v' + PLUGIN_VERSION + '. IP:порт MiniDLNA на Кинетике. По умолчанию 192.168.1.1:8200.' },
                 onChange: function () {
                     // Адрес сменился — кеш index не валиден, тянем заново.
                     try { Lampa.Storage.set(ALL_VIDEO_ID_KEY, ''); } catch (e) {}
