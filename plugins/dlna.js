@@ -18,6 +18,26 @@
     var DEFAULT_DLNA_PROXY = 'http://192.168.1.1:8780/proxy/';
     var SOAPNS = 'urn:schemas-upnp-org:service:ContentDirectory:1';
 
+    var STORAGE_TR_ADDR  = 'transmission_rpc';
+    var STORAGE_TR_USER  = 'transmission_user';
+    var STORAGE_TR_PASS  = 'transmission_pass';
+    var STORAGE_TR_DIR   = 'transmission_dir';
+    var DEFAULT_TR_ADDR  = '192.168.1.1:8090';
+    var DEFAULT_TR_USER  = 'admin';
+
+    function trAddr() {
+        return (Lampa.Storage.field(STORAGE_TR_ADDR) || DEFAULT_TR_ADDR)
+            .replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    }
+    function trCreds() {
+        var user = Lampa.Storage.field(STORAGE_TR_USER) || '';
+        var pass = Lampa.Storage.field(STORAGE_TR_PASS) || '';
+        return { user: user, pass: pass };
+    }
+    function trDownloadDir() {
+        return (Lampa.Storage.field(STORAGE_TR_DIR) || '').trim();
+    }
+
     function dlnaAddr() {
         return (Lampa.Storage.field(STORAGE_DLNA_ADDR) || DEFAULT_DLNA_ADDR).replace(/^https?:\/\//, '').replace(/\/+$/, '');
     }
@@ -1526,6 +1546,125 @@
             '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
         document.head.appendChild(style);
     }
+
+    // Клиент Transmission RPC. Один POST torrent-add через serve.py.
+    // На сборке Transmission в Кинетике CSRF отключен — обычно достаточно одного
+    // запроса. Для совместимости со стандартным Transmission реализована fallback-
+    // ветка на 409→retry с X-Transmission-Session-Id. Используем XHR, потому что
+    // Lampa.Reguest не пробрасывает HTTP-статус и custom response-headers.
+    var TransmissionClient = (function () {
+        var sessionId = null;
+
+        function rpcUrl() {
+            var proxy = proxyBase();
+            if (!proxy) return '';
+            return proxy + 'http://' + trAddr() + '/transmission/rpc';
+        }
+
+        function basicAuthHeader() {
+            var c = trCreds();
+            if (!c.user || !c.pass) return null;  // basic-auth с пустым паролем
+                                                  // ломает запрос на некоторых билдах
+            return 'Basic ' + btoa(c.user + ':' + c.pass);
+        }
+
+        function buildBody(magnetOrUrl) {
+            var args = { filename: magnetOrUrl };
+            var dir = trDownloadDir();
+            if (dir) args['download-dir'] = dir;
+            return JSON.stringify({ method: 'torrent-add', arguments: args });
+        }
+
+        function send(magnetOrUrl, onDone, onFail) {
+            var url = rpcUrl();
+            if (!url) { onFail({ reason: 'no_proxy' }); return; }
+            postOnce(url, magnetOrUrl, sessionId, function (status, sid, body) {
+                if (status === 409 && sid && sid !== sessionId) {
+                    sessionId = sid;
+                    postOnce(url, magnetOrUrl, sessionId, function (s2, _, b2) {
+                        handleFinal(s2, b2, onDone, onFail);
+                    });
+                    return;
+                }
+                handleFinal(status, body, onDone, onFail);
+            });
+        }
+
+        function postOnce(url, magnetOrUrl, sid, cb) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', url, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var auth = basicAuthHeader();
+            if (auth) xhr.setRequestHeader('Authorization', auth);
+            if (sid) xhr.setRequestHeader('X-Transmission-Session-Id', sid);
+            xhr.timeout = 15000;
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                var sidFromResp = xhr.getResponseHeader('X-Transmission-Session-Id');
+                cb(xhr.status, sidFromResp, xhr.responseText || '');
+            };
+            xhr.ontimeout = function () { cb(0, null, ''); };
+            xhr.onerror = function () { cb(0, null, ''); };
+            xhr.send(buildBody(magnetOrUrl));
+        }
+
+        function handleFinal(status, bodyText, onDone, onFail) {
+            if (status === 401) { onFail({ reason: 'auth' }); return; }
+            if (status === 0)   { onFail({ reason: 'network' }); return; }
+            if (status === 403) { onFail({ reason: 'forbidden' }); return; }
+            if (status >= 500)  { onFail({ reason: 'server', status: status }); return; }
+            var data;
+            try { data = JSON.parse(bodyText); }
+            catch (e) { onFail({ reason: 'parse', body: bodyText }); return; }
+            if (!data || data.result !== 'success') {
+                onFail({ reason: 'rpc', message: data && data.result });
+                return;
+            }
+            var added = data.arguments && data.arguments['torrent-added'];
+            var dup   = data.arguments && data.arguments['torrent-duplicate'];
+            if (added) { onDone({ added: true, name: added.name || '' }); return; }
+            if (dup)   { onDone({ duplicate: true, name: dup.name || '' }); return; }
+            onFail({ reason: 'empty_args' });
+        }
+
+        return {
+            addTorrent: function (opts, onDone, onFail) {
+                if (!opts || !opts.magnet) { onFail({ reason: 'no_magnet' }); return; }
+                send(opts.magnet, onDone || function () {}, onFail || function () {});
+            },
+            // Для теста соединения из Settings: один POST session-stats
+            ping: function (onDone, onFail) {
+                var url = rpcUrl();
+                if (!url) { onFail({ reason: 'no_proxy' }); return; }
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', url, true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                var auth = basicAuthHeader();
+                if (auth) xhr.setRequestHeader('Authorization', auth);
+                if (sessionId) xhr.setRequestHeader('X-Transmission-Session-Id', sessionId);
+                xhr.timeout = 8000;
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState !== 4) return;
+                    var sid = xhr.getResponseHeader('X-Transmission-Session-Id');
+                    if (xhr.status === 409 && sid) {
+                        sessionId = sid;
+                        return TransmissionClient.ping(onDone, onFail);
+                    }
+                    if (xhr.status === 401) { onFail({ reason: 'auth' }); return; }
+                    if (xhr.status === 0)   { onFail({ reason: 'network' }); return; }
+                    try {
+                        var d = JSON.parse(xhr.responseText || '{}');
+                        if (d.result === 'success') onDone(d.arguments || {});
+                        else onFail({ reason: 'rpc', message: d.result });
+                    } catch (e) { onFail({ reason: 'parse' }); }
+                };
+                xhr.ontimeout = function () { onFail({ reason: 'network' }); };
+                xhr.onerror   = function () { onFail({ reason: 'network' }); };
+                xhr.send(JSON.stringify({ method: 'session-stats' }));
+            },
+            _resetSession: function () { sessionId = null; }
+        };
+    })();
 
     function startPlugin() {
         injectStyles();
