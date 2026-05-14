@@ -1666,6 +1666,131 @@
         };
     })();
 
+    // Извлечение magnet и человеко-читаемого имени из контекстного меню
+    // торрент-раздачи. Структура items различается между online-источниками,
+    // поэтому пробуем несколько fallback-стратегий.
+    function extractTorrentInfo(params) {
+        if (!params || !Array.isArray(params.items)) return null;
+        var magnet = null;
+        var name = (params.title || '').toString();
+        var seeds = 0;
+
+        // Стратегия 1: явное поле в каком-то item.
+        for (var i = 0; i < params.items.length; i++) {
+            var it = params.items[i] || {};
+            var candidate = it.magnet || it.MagnetUri || it.link || it.url;
+            if (typeof candidate === 'string' && /^magnet:\?/.test(candidate)) {
+                magnet = candidate; break;
+            }
+            if (it._torrent && typeof it._torrent.magnet === 'string') {
+                magnet = it._torrent.magnet; break;
+            }
+        }
+
+        // Стратегия 2: regex по текстам всех items + title.
+        if (!magnet) {
+            var blob = name + ' ' + JSON.stringify(params.items);
+            var m = blob.match(/magnet:\?xt=urn:btih:[A-Fa-f0-9]+[^"\s]*/);
+            if (m) magnet = m[0];
+        }
+
+        if (!magnet) return null;
+
+        // Сиды — best-effort, для subtitle.
+        var seedsMatch = JSON.stringify(params.items).match(/"?seeds"?\s*:\s*(\d+)/i);
+        if (seedsMatch) seeds = parseInt(seedsMatch[1], 10);
+
+        return { magnet: magnet, name: name || 'торрент', seeds: seeds };
+    }
+
+    // Override Lampa.Select.show для инжекта «Скачать на Кинетик» в context-меню
+    // торрент-раздачи. try/catch гарантирует что override никогда не ломает
+    // нативное поведение LAMPA.
+    var TransmissionAddon = (function () {
+        var TORRENT_COMPONENTS = ['torrents', 'online', 'lampac_online'];
+        var installed = false;
+
+        function isTorrentContext() {
+            try {
+                var a = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                if (!a || !a.component) return false;
+                return TORRENT_COMPONENTS.indexOf(a.component) >= 0;
+            } catch (e) { return false; }
+        }
+
+        function makeItem(info) {
+            return {
+                title: 'Скачать на Кинетик',
+                subtitle: (info.seeds ? info.seeds + ' сидов · ' : '') + 'отправить в Transmission',
+                _kt_send: true,
+                _kt_info: info
+            };
+        }
+
+        function send(info) {
+            Lampa.Noty.show('Отправляю в Transmission…');
+            TransmissionClient.addTorrent({ magnet: info.magnet, name: info.name },
+                function (res) {
+                    var label = res.name || info.name || '';
+                    if (res.duplicate) Lampa.Noty.show('Уже в очереди: ' + label);
+                    else                Lampa.Noty.show('Добавлено: ' + label);
+                },
+                function (err) {
+                    var msg;
+                    switch (err.reason) {
+                        case 'auth':      msg = 'Неверный логин/пароль Transmission'; break;
+                        case 'network':   msg = 'Прокси/RPC недоступен. Проверь serve.py и адрес RPC.'; break;
+                        case 'forbidden': msg = 'Прокси: хост не в allowlist (DLNA_PROXY_ALLOW)'; break;
+                        case 'no_magnet': msg = 'Не удалось определить magnet'; break;
+                        case 'no_proxy':  msg = 'Не задан Прокси URL'; break;
+                        case 'rpc':       msg = 'Transmission: ' + (err.message || 'ошибка'); break;
+                        case 'parse':     msg = 'Некорректный ответ Transmission'; break;
+                        default:          msg = 'Ошибка: ' + (err.reason || 'неизвестно');
+                    }
+                    console.warn('[transmission]', err);
+                    Lampa.Noty.show(msg);
+                });
+        }
+
+        function wrap(params) {
+            try {
+                if (!isTorrentContext()) return params;
+                var info = extractTorrentInfo(params);
+                if (!info) return params;
+                // Идемпотентность: вдруг Select.show вызывается повторно с теми же
+                // items (например после возврата фокуса).
+                var already = params.items && params.items.length && params.items[0]._kt_send;
+                if (already) return params;
+                var item = makeItem(info);
+                params.items = [item].concat(params.items || []);
+                var origOnSelect = params.onSelect;
+                params.onSelect = function (selected) {
+                    if (selected && selected._kt_send) {
+                        send(selected._kt_info);
+                        return;
+                    }
+                    if (typeof origOnSelect === 'function') origOnSelect.apply(this, arguments);
+                };
+                return params;
+            } catch (e) {
+                console.warn('[transmission] wrap failed', e);
+                return params;
+            }
+        }
+
+        function install() {
+            if (installed) return;
+            if (!window.Lampa || !Lampa.Select || typeof Lampa.Select.show !== 'function') return;
+            var orig = Lampa.Select.show;
+            Lampa.Select.show = function (params) {
+                return orig.call(this, wrap(params));
+            };
+            installed = true;
+        }
+
+        return { install: install, _wrap: wrap, _extract: extractTorrentInfo };
+    })();
+
     function startPlugin() {
         injectStyles();
 
@@ -1756,8 +1881,10 @@
             // чтобы не конкурировать со стартом LAMPA.
             try { IndexService.load(); } catch (e) {}
             try { CardButton.init(); } catch (e) {}
+            try { TransmissionAddon.install(); } catch (e) {}
             setTimeout(function () {
                 try { IndexService.quickCheck(); } catch (e) {}
+                try { TransmissionAddon.install(); } catch (e) {}  // retry если Lampa.Select не был готов
             }, 2000);
         }
 
