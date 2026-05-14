@@ -1268,6 +1268,12 @@
         this.stop = function () {};
         this.destroy = function () {
             self._destroyed = true;
+            // Парный remove к follow в create() — иначе после N push/pop
+            // в шине dlna_index копятся мертвые closures, каждое событие
+            // индекса дергает destroyed-компонент.
+            if (window.Lampa && Lampa.Listener && self._onIndex) {
+                try { Lampa.Listener.remove('dlna_index', self._onIndex); } catch (e) {}
+            }
             if (scroll) scroll.destroy();
             if (html) html.remove();
         };
