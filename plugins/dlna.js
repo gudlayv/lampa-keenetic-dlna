@@ -4,7 +4,7 @@
     if (window.plugin_keenetic_dlna) return;
     window.plugin_keenetic_dlna = true;
 
-    var PLUGIN_VERSION = '0.9.4';
+    var PLUGIN_VERSION = '0.9.5';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -662,7 +662,12 @@
     // Используется CardButton (стандартная карточка LAMPA),
     // EpisodeListComponent (Activity со списком серий) и
     // Component.playEntry (внутренняя вкладка Movies — как обертка).
-    function playMovie(entry, card, displayTitle) {
+    //
+    // group (опц.) — массив братских entries того же сезона. Если задан и >1,
+    // в Lampa.Player.playlist() уйдут все серии: position автоматически
+    // определяется по совпадению url с текущей (см. yumata/lampa-source
+    // src/interaction/player/playlist.js → set()).
+    function playMovie(entry, card, displayTitle, group) {
         if (!entry || !entry.url) {
             if (window.Lampa && Lampa.Noty) Lampa.Noty.show('Нет URL для воспроизведения');
             return;
@@ -688,8 +693,39 @@
         } catch (e) {}
 
         var title = displayTitle || (card && (card.title || card.name || card.original_title || card.original_name)) || entry.title;
-        Lampa.Player.play({ title: title, url: entry.url, card: card || undefined, timeline: timeline });
-        Lampa.Player.playlist([{ title: title, url: entry.url, card: card || undefined, timeline: timeline }]);
+
+        var playlist;
+        if (Array.isArray(group) && group.length > 1) {
+            playlist = group.map(function (pe) {
+                var pep = pe._episode || null;
+                var ph = (card && pep) ? lampaHash(card, pep.season, pep.episode) : fileHash(pe.url);
+                var ptl = (window.Lampa && Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(ph) : null;
+                if (ptl) {
+                    ptl.hash = ph;
+                    var pdur = parseDurationToSeconds(pe.duration);
+                    if (pdur && !ptl.duration) ptl.duration = pdur;
+                }
+                var ptmdb = pe._tmdbEpisode;
+                var ptitle;
+                if (pep) {
+                    var pre = 'S' + String(pep.season).padStart(2, '0') + 'E' + String(pep.episode).padStart(2, '0');
+                    ptitle = (ptmdb && ptmdb.name) ? (pre + ' · ' + ptmdb.name) : pre;
+                } else {
+                    ptitle = pe.title || '';
+                }
+                return { title: ptitle, url: pe.url, timeline: ptl };
+            });
+        } else {
+            playlist = [{ title: title, url: entry.url, timeline: timeline }];
+        }
+
+        var playData = { title: title, url: entry.url, card: card || undefined, timeline: timeline };
+        // Lampa.Player сам прокидывает data.playlist во внешние плееры (Infuse/tvOS)
+        // через query — нужно для multi-URL плейлиста на iOS-плеерах.
+        if (playlist.length > 1) playData.playlist = playlist;
+
+        Lampa.Player.play(playData);
+        Lampa.Player.playlist(playlist);
     }
 
     function Component() {
@@ -1120,9 +1156,16 @@
             var seriesTmdb = (entry._series && entry._series.tmdb) || (episode && entry._tmdb);
             var card;
             var title;
+            var group = null;
             if (episode && seriesTmdb) {
                 card = Object.assign({}, seriesTmdb, { source: 'tmdb', method: 'tv' });
                 title = (card.name || card.original_name) + ' · S' + episode.season + 'E' + episode.episode;
+                // Внутри сезона payload текущего стека — все серии этой группы.
+                var stack = getStack();
+                var top = stack[stack.length - 1];
+                if (top && top.kind === 'episodes' && Array.isArray(top.payload)) {
+                    group = top.payload;
+                }
             } else if (entry.tmdb || entry._tmdb) {
                 var hit = entry.tmdb || entry._tmdb;
                 card = Object.assign({}, hit, { source: 'tmdb', method: 'movie' });
@@ -1133,7 +1176,7 @@
                 card = buildCard(entry, fbHash);
                 title = entry.title;
             }
-            playMovie(entry, card, title);
+            playMovie(entry, card, title, group);
         }
 
         this.render = function () { return html; };
@@ -1296,10 +1339,15 @@
                     if (seasonData && seasonData.episodes) {
                         seasonData.episodes.forEach(function (e) { byNum[e.episode_number] = e; });
                     }
+                    // Заранее проставляем _episode/_tmdbEpisode всем entries сезона —
+                    // playMovie использует это при сборке плейлиста.
+                    var seasonEntries = bySeason[season].map(function (it) {
+                        it.entry._episode = it.entry._episode || { season: season, episode: it.episode };
+                        it.entry._tmdbEpisode = byNum[it.episode] || null;
+                        return it.entry;
+                    });
                     bySeason[season].forEach(function (it) {
-                        var tmdbEp = byNum[it.episode] || null;
-                        it.entry._tmdbEpisode = tmdbEp;
-                        var row = buildEpisodeRow(it.entry, it.episode, season, tmdbEp);
+                        var row = buildEpisodeRow(it.entry, it.episode, season, it.entry._tmdbEpisode, seasonEntries);
                         scroll.append(row);
                     });
                     // hover:focus у первой строки — для scroll-update
@@ -1311,7 +1359,7 @@
             Lampa.Controller.toggle('content');
         }
 
-        function buildEpisodeRow(entry, episodeNum, season, tmdbEp) {
+        function buildEpisodeRow(entry, episodeNum, season, tmdbEp, seasonEntries) {
             var seriesCard = card;
             var hash = lampaHash(seriesCard, season, episodeNum) || fileHash(entry.url);
             entry._hash = hash;
@@ -1358,7 +1406,7 @@
                 // Передаем эпизод-инфу плееру через временное поле,
                 // чтобы playMovie мог сгенерировать корректный hash.
                 entry._episode = entry._episode || { season: season, episode: episodeNum };
-                playMovie(entry, sCard, (sCard.name || sCard.original_name || '') + ' · ' + prefix + (tmdbEp && tmdbEp.name ? (' · ' + tmdbEp.name) : ''));
+                playMovie(entry, sCard, (sCard.name || sCard.original_name || '') + ' · ' + prefix + (tmdbEp && tmdbEp.name ? (' · ' + tmdbEp.name) : ''), seasonEntries);
             });
             return line;
         }
