@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.9.6';
+    var PLUGIN_VERSION = '0.9.7';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -695,7 +695,15 @@
                 var same = sameSize && Object.keys(newUrls).every(function (u) { return oldUrls[u]; });
                 if (same) {
                     state.ts = Date.now();
+                    // refresh() выставил status='loading'; в "same"-ветке мы не
+                    // идем в doFullRefresh, поэтому status некому вернуть в
+                    // 'ready'. Без этого openCurrent, увидев 'loading', будет
+                    // ждать события индекса, которое тоже не придет — лоадер
+                    // висит, пока пользователь руками не дернет full refresh.
+                    state.status = 'ready';
+                    state.error = null;
                     persist();
+                    fire('updated', { fromCache: false, unchanged: true });
                     done(null);
                     return;
                 }
@@ -901,6 +909,18 @@
                 }
             };
             if (window.Lampa && Lampa.Listener) Lampa.Listener.follow('dlna_index', self._onIndex);
+            // Возврат из плеера: Activity.start не перевызывается при закрытии
+            // overlay-плеера, поэтому единственный надежный сигнал обновить
+            // прогресс-бары — Lampa.Player.listener('destroy').
+            self._onPlayerDestroy = function () {
+                if (self._destroyed) return;
+                refreshProgress();
+            };
+            try {
+                if (window.Lampa && Lampa.Player && Lampa.Player.listener) {
+                    Lampa.Player.listener.follow('destroy', self._onPlayerDestroy);
+                }
+            } catch (e) {}
             this.openCurrent();
         };
 
@@ -1367,9 +1387,10 @@
                 }
             });
             Lampa.Controller.toggle('content');
-            // При возврате в активити (из плеера) — обновляем визуальный прогресс
-            // на строках. LAMPA пишет timeline в Storage сама, но наш DOM был
-            // отрисован до начала просмотра.
+            // Первичный прогресс на момент монтирования (на случай если
+            // timeline уже был записан в прошлой сессии). Обновление после
+            // выхода из плеера висит на Lampa.Player.listener('destroy') — см.
+            // self._onPlayerDestroy в this.create.
             refreshProgress();
         };
 
@@ -1416,6 +1437,13 @@
             // индекса дергает destroyed-компонент.
             if (window.Lampa && Lampa.Listener && self._onIndex) {
                 try { Lampa.Listener.remove('dlna_index', self._onIndex); } catch (e) {}
+            }
+            if (self._onPlayerDestroy) {
+                try {
+                    if (window.Lampa && Lampa.Player && Lampa.Player.listener) {
+                        Lampa.Player.listener.remove('destroy', self._onPlayerDestroy);
+                    }
+                } catch (e) {}
             }
             if (scroll) scroll.destroy();
             if (html) html.remove();
