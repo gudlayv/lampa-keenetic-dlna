@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.2';
+    var PLUGIN_VERSION = '0.10.3';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -538,7 +538,7 @@
     // "Список серий". Поднимается на app:ready, кеш в Lampa.Storage.
 
     var INDEX_STORAGE_KEY = 'dlna_index_v1';
-    var INDEX_VERSION = 2; // 2: индекс по дереву папок (folder-tree) — старый снапшот невалиден
+    var INDEX_VERSION = 3; // 3: Video→Folders как корень дерева (фикс папки "Download")
     var INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     // localStorage origin-quota обычно 5MB. На крупной DLNA-библиотеке
     // (5000+ файлов) сериализованный snapshot (entries + URL-карты)
@@ -980,7 +980,10 @@
     // Резолв дерева папок диска: Корень → "Browse Folders", иначе "Video" → "Folders".
     // Это иерархия, мирроящая диск (в отличие от плоского "All Video"), —
     // даёт имя родительской папки для каждого файла. cb(id|null).
-    var FOLDERS_ID_KEY = 'dlna_folders_id';
+    // v2: предпочитаем "Video → Folders" (только видео-каталоги, рутится на
+    // медиа-папке), а не "Browse Folders" (там системные blocklists/resume/
+    // torrents/watch — descendToTitleLevel принял бы их за тайтлы).
+    var FOLDERS_ID_KEY = 'dlna_folders_id_v2';
     function findFoldersRoot(cb) {
         try {
             var cached = Lampa.Storage.get(FOLDERS_ID_KEY, '');
@@ -988,15 +991,18 @@
         } catch (e) {}
         function remember(id) { try { Lampa.Storage.set(FOLDERS_ID_KEY, id); } catch (e) {} cb(id); }
         browse('0', function (rootEntries) {
-            var bf = rootEntries.find(function (e) { return e.isFolder && /^browse\s*folders$/i.test(e.title); });
-            if (bf) { remember(bf.id); return; }
+            function browseFoldersFallback() {
+                var bf = rootEntries.find(function (e) { return e.isFolder && /^browse\s*folders$/i.test(e.title); });
+                if (bf) { remember(bf.id); return; }
+                cb(null);
+            }
             var video = rootEntries.find(function (e) { return e.isFolder && /^video$/i.test(e.title); });
-            if (!video) { cb(null); return; }
+            if (!video) { browseFoldersFallback(); return; }
             browse(video.id, function (vidEntries) {
                 var folders = vidEntries.find(function (e) { return e.isFolder && /^folders$/i.test(e.title); });
                 if (folders) { remember(folders.id); return; }
-                cb(null);
-            }, function () { cb(null); });
+                browseFoldersFallback();
+            }, function () { browseFoldersFallback(); });
         }, function () { cb(null); });
     }
 
