@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.1';
+    var PLUGIN_VERSION = '0.10.2';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -538,7 +538,7 @@
     // "Список серий". Поднимается на app:ready, кеш в Lampa.Storage.
 
     var INDEX_STORAGE_KEY = 'dlna_index_v1';
-    var INDEX_VERSION = 1;
+    var INDEX_VERSION = 2; // 2: индекс по дереву папок (folder-tree) — старый снапшот невалиден
     var INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     // localStorage origin-quota обычно 5MB. На крупной DLNA-библиотеке
     // (5000+ файлов) сериализованный snapshot (entries + URL-карты)
