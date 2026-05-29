@@ -1769,7 +1769,23 @@
             '.dlna-keenetic .selector.hover{background:rgba(255,255,255,0.18)!important;}' +
             // SVG — ограничиваем размер, иначе LAMPA-стили растягивают на 100%
             '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
-            '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
+            '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}' +
+            // --- Карточная сетка ---
+            '.dlna-grid{display:flex;flex-wrap:wrap;gap:1.4em 1.2em;padding:0.6em 1em 1.4em;}' +
+            '.dlna-card{width:calc((100% - 4 * 1.2em) / 5);position:relative;}' +
+            '.dlna-card__poster{position:relative;width:100%;padding-bottom:150%;border-radius:0.7em;overflow:hidden;background:rgba(255,255,255,0.07) center/cover no-repeat;}' +
+            '.dlna-card__ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0.35;}' +
+            '.dlna-card__progress{height:0.32em;background:rgba(255,255,255,0.12);border-radius:0.16em;margin-top:0.4em;overflow:hidden;}' +
+            '.dlna-card__progress > div{height:100%;background:#7ed957;}' +
+            '.dlna-card__title{font-size:1.02em;font-weight:600;line-height:1.2;margin-top:0.45em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}' +
+            '.dlna-card__meta{font-size:0.82em;opacity:0.72;margin-top:0.2em;}' +
+            '.dlna-card__meta .rate{color:#ffd966;}' +
+            '.dlna-card__meta .watched{color:#7ed957;margin-right:0.35em;font-weight:bold;}' +
+            // Фокус: рамка на постере через box-shadow, без transition/scale (Tizen WebKit 76).
+            // Сама плитка фон не подсвечивает — перебиваем общий .selector.focus.
+            '.dlna-keenetic .dlna-card.focus,.dlna-keenetic .dlna-card.hover{background:transparent!important;}' +
+            '.dlna-keenetic .dlna-card.focus .dlna-card__poster,.dlna-keenetic .dlna-card.hover .dlna-card__poster{box-shadow:0 0 0 0.22em #fff;}' +
+            '.dlna-keenetic .dlna-card__ph svg{width:2.4em!important;height:2.4em!important;}';
         document.head.appendChild(style);
     }
 
