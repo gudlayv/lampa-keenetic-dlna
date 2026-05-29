@@ -1604,8 +1604,9 @@
                 },
                 down:  function () { if (Navigator.canmove('down'))  Navigator.move('down'); },
                 left:  function () { if (Navigator.canmove('left'))  Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
-                // → из любой строки списка открывает popup фильтров — глобальный шорткат
-                right: function () { openFilter(); },
+                // → навигация по карточкам в ряду; с крайней правой (соседа нет)
+                //   открывает popup фильтров — глобальный шорткат
+                right: function () { if (Navigator.canmove('right')) Navigator.move('right'); else openFilter(); },
                 back: function () {
                     var s = getStack();
                     if (s.length > 1) { s.pop(); self.openCurrent(); }
