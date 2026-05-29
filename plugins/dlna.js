@@ -268,6 +268,55 @@
         return null;
     }
 
+    // ===== Folder-aware разрешение имени шоу (индекс по дереву папок) =====
+    // Проблема: MiniDLNA "All Video" — плоский список, имя файла ненадежно
+    // (то "S01E02 Lakeshore Limited" без префикса шоу, то "09 серия.mkv").
+    // Надежный источник имени шоу — родительская папка. Эти хелперы это дают.
+
+    // Нормализованный ключ: lowercase, без не-буквенно-цифровых. Сливает
+    // варианты написания ("Marvel's Daredevil" / "Marvels Daredevil").
+    function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-zа-я0-9]+/gi, ''); }
+
+    // Строгий префикс: имя шоу ТОЛЬКО из явного "Show.SxxExx" / "Show 1x03".
+    // Без suffix-эвристики parseEpisode (которая путает имя эпизода с шоу).
+    function strictPrefix(name) {
+        name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        var m = name.match(/^(.+?)[._\s\-]+S(\d{1,2})[._\s\-]?E(\d{1,3})/i);
+        if (m) return { show: cleanShow(m[1]), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+        m = name.match(/^(.+?)[._\s\-]+(\d{1,2})x(\d{1,3})\b/i);
+        if (m) return { show: cleanShow(m[1]), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
+        return null;
+    }
+
+    // Имя шоу из имени ПАПКИ: обрезаем по первому маркеру сезона/года/качества.
+    var FOLDER_CUT = /[\s._\-(\[]+(S\d{1,2}\b|сезон|season\b|\(?(19|20)\d{2}\)?|\d{3,4}p\b|2160p|1080p|720p|4k|4к|web-?dl|webrip|bdremux|bdrip|dcprip|hdr|hevc|x264|x265|amzn|nf|dsnp)/i;
+    function cleanFolderTitle(folder) {
+        var s = String(folder || '');
+        var m = s.match(FOLDER_CUT);
+        if (m && m.index > 0) s = s.slice(0, m.index);
+        return s.replace(/^\[[^\]]+\][\s._\-]*/, '').replace(/[._]+/g, ' ').replace(/[\s\-]+$/, '').trim();
+    }
+    var FOLDER_SEASON = /(?:S(\d{1,2})\b|(\d{1,2})[\s._\-]*сезон|season[\s._\-]*(\d{1,2}))/i;
+    function folderSeason(folder) {
+        var m = String(folder || '').match(FOLDER_SEASON);
+        return m ? parseInt(m[1] || m[2] || m[3], 10) : null;
+    }
+    // Номер серии из файла: SxxExx → episode; "NN серия"; "NxNN"; trailing N.
+    function episodeNum(name) {
+        name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        var m = name.match(/S\d{1,2}[._\s\-]?E(\d{1,3})/i); if (m) return parseInt(m[1], 10);
+        m = name.match(/\b(\d{1,3})[._\s\-]*сери/i); if (m) return parseInt(m[1], 10);
+        m = name.match(/(\d{1,3})x(\d{1,3})/i); if (m) return parseInt(m[2], 10);
+        // "Show 6.WEB-DLRip" — номер перед release/quality-тегом
+        m = name.match(/[\s._\-](\d{1,3})[\s._\-](?:web|bd|hd|dvd|x26|480|720|1080|2160|rip|selezen|hevc)/i); if (m) return parseInt(m[1], 10);
+        m = name.match(/(\d{1,3})\s*$/); if (m) return parseInt(m[1], 10);
+        return null;
+    }
+    function episodeSeasonFromFile(name) {
+        var m = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '').match(/S(\d{1,2})[._\s\-]?E\d{1,3}/i);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
     // TMDB search через API ключ LAMPA. type: 'movie' | 'tv'
     // Кеши с soft-LRU (FIFO eviction): на крупной библиотеке без cap'a
     // словари растут безгранично пока вкладка жива.
@@ -406,9 +455,11 @@
         var rest = [];
         rawEntries.forEach(function (e) {
             if (e.isFolder) { rest.push(e); return; }
-            var ep = parseEpisode(e.title);
+            // Доверяем _episode из индекса (имя шоу из папки); fallback —
+            // парсинг имени файла (живая вкладка "Папки", без индекса).
+            var ep = e._episode || parseEpisode(e.title);
             if (!ep) { rest.push(e); return; }
-            var key = ep.show.toLowerCase() + '|' + ep.season;
+            var key = normKey(ep.show) + '|' + ep.season;
             if (!groups[key]) groups[key] = { show: ep.show, season: ep.season, episodes: [] };
             e._episode = ep;
             groups[key].episodes.push(e);
@@ -439,7 +490,7 @@
         var result = [];
         entries.forEach(function (entry) {
             if (entry.isVirtualSeries) {
-                var key = entry.show.toLowerCase();
+                var key = normKey(entry.show);
                 if (!shows[key]) {
                     shows[key] = {
                         isVirtualShow: true,
@@ -635,17 +686,85 @@
         }
 
         // Полная пересборка индекса.
-        function doFullRefresh(done) {
+        // TMDB-резолв + запись индекса. singles — фильмы (с _parsed),
+        // seriesGroupsByKey — { normKey: {show, episodes:[ {_episode:{show,season,episode}} ]} }.
+        function resolveAndStore(singles, seriesGroupsByKey, done) {
+            var newByMovie = Object.create(null);
+            var newBySeries = Object.create(null);
+            var allEntries = [];
+
+            var movieTasks = singles.map(function (entry) {
+                return function (taskDone) {
+                    tmdbSearch(entry._parsed.title, entry._parsed.year, 'movie', function (hit) {
+                        if (hit && hit.id != null) {
+                            entry._tmdb = hit;
+                            var arr = newByMovie[hit.id] || (newByMovie[hit.id] = []);
+                            arr.push(entry);
+                        }
+                        allEntries.push(entry);
+                        taskDone();
+                    });
+                };
+            });
+
+            var seriesTasks = Object.keys(seriesGroupsByKey).map(function (gk) {
+                var grp = seriesGroupsByKey[gk];
+                return function (taskDone) {
+                    tmdbSearch(grp.show, null, 'tv', function (hit) {
+                        if (hit && hit.id != null) {
+                            var bucket = newBySeries[hit.id];
+                            if (!bucket) {
+                                bucket = newBySeries[hit.id] = { byEp: Object.create(null), seasons: [] };
+                            }
+                            var seasonsSet = Object.create(null);
+                            bucket.seasons.forEach(function (s) { seasonsSet[s] = true; });
+                            grp.episodes.forEach(function (ep) {
+                                ep._tmdb = hit;
+                                var k = epKey(ep._episode.season, ep._episode.episode);
+                                bucket.byEp[k] = ep;
+                                seasonsSet[ep._episode.season] = true;
+                            });
+                            bucket.seasons = Object.keys(seasonsSet).map(Number).sort(function (a, b) { return a - b; });
+                        }
+                        grp.episodes.forEach(function (ep) { allEntries.push(ep); });
+                        taskDone();
+                    });
+                };
+            });
+
+            runPool(movieTasks.concat(seriesTasks), 5, function () {
+                state.byMovieId = newByMovie;
+                state.bySeriesId = newBySeries;
+                state.allEntries = allEntries;
+                state.ts = Date.now();
+                state.addr = dlnaAddr();
+                state.status = 'ready';
+                state.error = null;
+                persist();
+                fire('updated', { fromCache: false });
+                done(null);
+            });
+        }
+
+        function refreshFailed(done, err) {
+            state.status = 'error';
+            state.error = err && err.message ? err.message : 'browse_failed';
+            fire('error', { error: state.error });
+            done(state.error);
+        }
+
+        // Старый путь: плоский "All Video", имя шоу из имени файла.
+        // Fallback, если дерево папок не нашлось.
+        function legacyFlatRefresh(done) {
             sweepBrowse(function (rawEntries) {
-                // Разбиваем на одиночки и группы серий
                 var singles = [];
                 var seriesGroupsByKey = Object.create(null);
                 rawEntries.forEach(function (e) {
-                    if (e.isFolder) return; // папки внутри All Video — игнорируем
+                    if (e.isFolder) return;
                     var ep = parseEpisode(e.title);
                     if (ep) {
                         e._episode = ep;
-                        var key = ep.show.toLowerCase();
+                        var key = normKey(ep.show);
                         if (!seriesGroupsByKey[key]) seriesGroupsByKey[key] = { show: ep.show, episodes: [] };
                         seriesGroupsByKey[key].episodes.push(e);
                     } else {
@@ -653,70 +772,86 @@
                         singles.push(e);
                     }
                 });
+                resolveAndStore(singles, seriesGroupsByKey, done);
+            }, function (err) { refreshFailed(done, err); });
+        }
 
-                var newByMovie = Object.create(null);
-                var newBySeries = Object.create(null);
-                var allEntries = [];
-
-                // TMDB-запросы для фильмов параллельно с ограничением.
-                var movieTasks = singles.map(function (entry) {
-                    return function (taskDone) {
-                        tmdbSearch(entry._parsed.title, entry._parsed.year, 'movie', function (hit) {
-                            if (hit && hit.id != null) {
-                                entry._tmdb = hit;
-                                var arr = newByMovie[hit.id] || (newByMovie[hit.id] = []);
-                                arr.push(entry);
-                            }
-                            allEntries.push(entry);
-                            taskDone();
-                        });
-                    };
+        // Folder-aware: каждый top-level узел дерева = один тайтл (папка или
+        // одиночный файл). Имя шоу — из префикса файла (если есть), иначе из
+        // имени папки. Номер серии — из файла. Группировка по normKey.
+        function buildFromTitleUnits(units, done) {
+            var singles = [];
+            var seriesGroupsByKey = Object.create(null);
+            function addEpisode(showName, season, episode, fileEntry) {
+                var key = normKey(showName);
+                if (!key || episode == null) {
+                    fileEntry._parsed = parseFilename(fileEntry.title);
+                    singles.push(fileEntry);
+                    return;
+                }
+                if (!seriesGroupsByKey[key]) seriesGroupsByKey[key] = { show: showName, episodes: [] };
+                fileEntry._episode = { show: seriesGroupsByKey[key].show, season: season, episode: episode };
+                seriesGroupsByKey[key].episodes.push(fileEntry);
+            }
+            units.forEach(function (u) {
+                if (u.kind === 'file') {
+                    u.file._parsed = parseFilename(u.file.title);
+                    singles.push(u.file);
+                    return;
+                }
+                var folderTitle = cleanFolderTitle(u.folder);
+                var fSeason = folderSeason(u.folder);
+                var seriesLike = u.files.length > 1 || u.files.some(function (f) {
+                    return /S\d{1,2}[._\s\-]?E\d{1,3}|сери|\d{1,2}x\d{1,3}/i.test(f.title);
                 });
+                if (!seriesLike) {
+                    var mf = u.files[0];
+                    mf._parsed = parseFilename(u.folder);
+                    singles.push(mf);
+                    return;
+                }
+                // Сортируем по имени — для files без распознанного номера серии
+                // даём порядковый, чтобы файл сериала никогда не утёк в "фильмы".
+                u.files.slice().sort(function (a, b) {
+                    return String(a.title).localeCompare(String(b.title), undefined, { numeric: true });
+                }).forEach(function (f, i) {
+                    var sp = strictPrefix(f.title);
+                    if (sp && sp.show) {
+                        addEpisode(sp.show, sp.season, sp.episode, f);
+                    } else {
+                        var s = episodeSeasonFromFile(f.title) || fSeason || 1;
+                        var ep = episodeNum(f.title);
+                        if (ep == null) ep = i + 1;
+                        addEpisode(folderTitle, s, ep, f);
+                    }
+                });
+            });
+            resolveAndStore(singles, seriesGroupsByKey, done);
+        }
 
-                // 1 TMDB-запрос на сериал (на группу).
-                var seriesTasks = Object.keys(seriesGroupsByKey).map(function (gk) {
-                    var grp = seriesGroupsByKey[gk];
-                    return function (taskDone) {
-                        tmdbSearch(grp.show, null, 'tv', function (hit) {
-                            if (hit && hit.id != null) {
-                                var bucket = newBySeries[hit.id];
-                                if (!bucket) {
-                                    bucket = newBySeries[hit.id] = { byEp: Object.create(null), seasons: [] };
-                                }
-                                var seasonsSet = Object.create(null);
-                                bucket.seasons.forEach(function (s) { seasonsSet[s] = true; });
-                                grp.episodes.forEach(function (ep) {
-                                    ep._tmdb = hit;
-                                    var k = epKey(ep._episode.season, ep._episode.episode);
-                                    bucket.byEp[k] = ep;
-                                    seasonsSet[ep._episode.season] = true;
+        function doFullRefresh(done) {
+            findFoldersRoot(function (foldersRoot) {
+                if (!foldersRoot) { legacyFlatRefresh(done); return; }
+                browse(foldersRoot, function (topEntries) {
+                    var units = [];
+                    var folderTasks = [];
+                    topEntries.forEach(function (e) {
+                        if (e.isFolder) {
+                            folderTasks.push(function (tdone) {
+                                collectVideos(e.id, function (files) {
+                                    if (files.length) units.push({ kind: 'folder', folder: e.title, files: files });
+                                    tdone();
                                 });
-                                bucket.seasons = Object.keys(seasonsSet).map(Number).sort(function (a, b) { return a - b; });
-                            }
-                            grp.episodes.forEach(function (ep) { allEntries.push(ep); });
-                            taskDone();
-                        });
-                    };
-                });
-
-                var allTasks = movieTasks.concat(seriesTasks);
-                runPool(allTasks, 5, function () {
-                    state.byMovieId = newByMovie;
-                    state.bySeriesId = newBySeries;
-                    state.allEntries = allEntries;
-                    state.ts = Date.now();
-                    state.addr = dlnaAddr();
-                    state.status = 'ready';
-                    state.error = null;
-                    persist();
-                    fire('updated', { fromCache: false });
-                    done(null);
-                });
-            }, function (err) {
-                state.status = 'error';
-                state.error = err && err.message ? err.message : 'browse_failed';
-                fire('error', { error: state.error });
-                done(state.error);
+                            });
+                        } else if (e.url) {
+                            units.push({ kind: 'file', file: e });
+                        }
+                    });
+                    runPool(folderTasks, 4, function () {
+                        if (!units.length) { legacyFlatRefresh(done); return; } // дерево пустое — подстрахуемся
+                        buildFromTitleUnits(units, done);
+                    });
+                }, function () { legacyFlatRefresh(done); });
             });
         }
 
@@ -839,6 +974,50 @@
                 cb(allVideo.id);
             }, function () { cb(null); });
         }, function () { cb(null); });
+    }
+
+    // Резолв дерева папок диска: Корень → "Browse Folders", иначе "Video" → "Folders".
+    // Это иерархия, мирроящая диск (в отличие от плоского "All Video"), —
+    // даёт имя родительской папки для каждого файла. cb(id|null).
+    var FOLDERS_ID_KEY = 'dlna_folders_id';
+    function findFoldersRoot(cb) {
+        try {
+            var cached = Lampa.Storage.get(FOLDERS_ID_KEY, '');
+            if (cached) { cb(cached); return; }
+        } catch (e) {}
+        function remember(id) { try { Lampa.Storage.set(FOLDERS_ID_KEY, id); } catch (e) {} cb(id); }
+        browse('0', function (rootEntries) {
+            var bf = rootEntries.find(function (e) { return e.isFolder && /^browse\s*folders$/i.test(e.title); });
+            if (bf) { remember(bf.id); return; }
+            var video = rootEntries.find(function (e) { return e.isFolder && /^video$/i.test(e.title); });
+            if (!video) { cb(null); return; }
+            browse(video.id, function (vidEntries) {
+                var folders = vidEntries.find(function (e) { return e.isFolder && /^folders$/i.test(e.title); });
+                if (folders) { remember(folders.id); return; }
+                cb(null);
+            }, function () { cb(null); });
+        }, function () { cb(null); });
+    }
+
+    // Рекурсивно собирает все видео-файлы (item с url) под containerId, любая
+    // глубина. cb(files[]). Ошибки веток проглатываются (частичный результат
+    // лучше пустого). Параллельные ветки сводятся счётчиком pending.
+    function collectVideos(containerId, cb) {
+        var out = [];
+        var pending = 0;
+        var fired = false;
+        function settle() { if (pending === 0 && !fired) { fired = true; cb(out); } }
+        function walk(id) {
+            pending++;
+            browse(id, function (entries) {
+                entries.forEach(function (e) {
+                    if (e.isFolder) walk(e.id);
+                    else if (e.url) out.push(e);
+                });
+                pending--; settle();
+            }, function () { pending--; settle(); });
+        }
+        walk(containerId);
     }
 
     var TABS = [
