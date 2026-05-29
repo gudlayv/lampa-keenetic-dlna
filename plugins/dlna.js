@@ -1029,6 +1029,11 @@
             scroll.clear();
             scroll.append($('<div style="padding:1em 1.2em; opacity:0.7;">Загрузка…</div>'));
 
+            if (top.kind === 'seasons') {
+                renderSeasonPicker(top, opts);
+                return;
+            }
+
             // Виртуальная группа эпизодов сериала — payload в стеке
             if (top.kind === 'episodes') {
                 var payload = top.payload || [];
@@ -1114,6 +1119,68 @@
             box.append('<b>Ошибка Browse:</b><br>' + escapeHtml(JSON.stringify(err)));
             scroll.append(box);
             self.activity.loader(false);
+        }
+
+        // Экран выбора сезона. top: { kind:'seasons', title, show }
+        function renderSeasonPicker(top, opts) {
+            opts = opts || {};
+            scroll.clear();
+            var stack = getStack();
+            var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
+            backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
+            backBtn.on('hover:focus', function () { scroll.update(backBtn); });
+            scroll.append(backBtn);
+
+            var showEntry = top.show;
+            var tmdb = showEntry.tmdb || null;
+            var grid = $('<div class="dlna-grid"></div>');
+
+            showEntry.seasons.forEach(function (seasonObj) {
+                var card = $('<div class="selector dlna-card dlna-card--season"></div>');
+                var poster = $('<div class="dlna-card__poster"></div>');
+                poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+                // fallback: общий постер сериала
+                if (tmdb && tmdb.poster_path) {
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(tmdb.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
+                }
+                card.append(poster);
+                card.append($('<div class="dlna-card__title"></div>').text('Сезон ' + seasonObj.season));
+                var epsN = seasonObj.episodes.length;
+                card.append($('<div class="dlna-card__meta"></div>').text(epsN + ' ' + ruPlural(epsN, ['серия', 'серии', 'серий'])));
+
+                // посезонный постер TMDB (если есть)
+                if (tmdb && tmdb.id != null) {
+                    tmdbSeason(tmdb.id, seasonObj.season, function (seasonData) {
+                        if (seasonData && seasonData.poster_path) {
+                            poster.css('background-image', 'url("' + tmdbPosterUrl(seasonData.poster_path, 'w300') + '")');
+                            poster.find('.dlna-card__ph').remove();
+                        }
+                    });
+                }
+
+                card.on('hover:focus', function () { scroll.update(card); });
+                card.on('hover:enter', function () {
+                    var payload = seasonObj.episodes.map(function (e) {
+                        e._series = { show: showEntry.show, tmdb: tmdb, season: seasonObj.season };
+                        return e;
+                    });
+                    stack.push({
+                        kind: 'episodes',
+                        title: (tmdb ? (tmdb.name || tmdb.original_name) : showEntry.show) + ' · Сезон ' + seasonObj.season,
+                        payload: payload
+                    });
+                    self.openCurrent();
+                });
+                grid.append(card);
+            });
+
+            scroll.append(grid);
+            self.activity.loader(false);
+            if (!opts.skipControllerToggle) {
+                self.activity.toggle();
+                Lampa.Controller.toggle('content');
+            }
         }
 
         function renderEntries(rawEntries, opts) {
