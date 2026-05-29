@@ -407,13 +407,32 @@ git commit -m "feat(grid): renderFolderCard + диспетчер renderCard"
 
 Найди в `renderEntries` блок, начинающийся с `var top = stack[stack.length - 1];` и заканчивающийся циклом `entries.forEach(function (entry) { var line = renderEntryRow(entry); ... });` плюс хвост (`self.activity.loader(false)` и toggle). Замени от `var top = ...` до конца этого `forEach` (НЕ трогая финальный `loader/toggle`-блок) на:
 
+Replace exactly this existing block:
+
 ```js
             var top = stack[stack.length - 1];
-            var isEpisodes = top.kind === 'episodes';
+            var skipGroup = top.kind === 'episodes' || currentTab === 'movies';
+            var entries = skipGroup ? rawEntries : groupEpisodes(rawEntries);
 
-            if (isEpisodes) {
+            if (!entries.length) {
+                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+            }
+
+            entries.forEach(function (entry) {
+                var line = renderEntryRow(entry);
+                line.on('hover:focus', function () { scroll.update(line); });
+                scroll.append(line);
+            });
+```
+
+with:
+
+```js
+            var top = stack[stack.length - 1];
+
+            if (top.kind === 'episodes') {
                 // Экран серий — список (16:9-кадр + описание), как раньше
-                var eps = top.kind === 'episodes' || currentTab === 'movies' ? rawEntries : groupEpisodes(rawEntries);
+                var eps = rawEntries;
                 if (!eps.length) {
                     scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
                 }
@@ -423,7 +442,7 @@ git commit -m "feat(grid): renderFolderCard + диспетчер renderCard"
                     scroll.append(line);
                 });
             } else {
-                // Сетка карточек
+                // Сетка карточек (Все / Фильмы / Сериалы / Папки)
                 var entries = groupShows(groupEpisodes(rawEntries));
                 if (!entries.length) {
                     scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
