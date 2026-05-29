@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.0';
+    var PLUGIN_VERSION = '0.10.1';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -832,7 +832,7 @@
         function doFullRefresh(done) {
             findFoldersRoot(function (foldersRoot) {
                 if (!foldersRoot) { legacyFlatRefresh(done); return; }
-                browse(foldersRoot, function (topEntries) {
+                descendToTitleLevel(foldersRoot, function (topEntries) {
                     var units = [];
                     var folderTasks = [];
                     topEntries.forEach(function (e) {
@@ -848,10 +848,11 @@
                         }
                     });
                     runPool(folderTasks, 4, function () {
-                        if (!units.length) { legacyFlatRefresh(done); return; } // дерево пустое — подстрахуемся
+                        // дерево пустое/не нашлось — подстрахуемся старым режимом
+                        if (!units.length) { legacyFlatRefresh(done); return; }
                         buildFromTitleUnits(units, done);
                     });
-                }, function () { legacyFlatRefresh(done); });
+                });
             });
         }
 
@@ -997,6 +998,24 @@
                 cb(null);
             }, function () { cb(null); });
         }, function () { cb(null); });
+    }
+
+    // Спускаемся сквозь папки-обёртки до уровня тайтлов. DLNA-дерево часто
+    // отдаёт корень выше шары: foldersRoot → "Download" → [сериалы/фильмы].
+    // Пока контейнер = ровно одна вложенная папка без прямых файлов — это
+    // путь-обёртка, идём внутрь. На уровне тайтлов (много детей или есть
+    // прямые файлы) — отдаём его содержимое. cb(entries).
+    function descendToTitleLevel(id, cb, depth) {
+        depth = depth || 0;
+        browse(id, function (entries) {
+            var folders = entries.filter(function (e) { return e.isFolder; });
+            var files = entries.filter(function (e) { return !e.isFolder && e.url; });
+            if (folders.length === 1 && files.length === 0 && depth < 6) {
+                descendToTitleLevel(folders[0].id, cb, depth + 1);
+            } else {
+                cb(entries);
+            }
+        }, function () { cb([]); });
     }
 
     // Рекурсивно собирает все видео-файлы (item с url) под containerId, любая
