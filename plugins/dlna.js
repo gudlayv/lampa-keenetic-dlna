@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.4';
+    var PLUGIN_VERSION = '0.10.5';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -2237,8 +2237,10 @@
             '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
             '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}' +
             // --- Карточная сетка ---
-            '.dlna-grid{display:flex;flex-wrap:wrap;gap:1.4em 1.2em;padding:0.6em 1em 1.4em;}' +
-            '.dlna-card{width:calc((100% - 4 * 1.2em) / 5);position:relative;}' +
+            // Отступы через padding на ячейке (как нативная сетка Лампы), а не gap —
+            // старый WebKit на ТВ не поддерживает flex-gap. box-sizing держит 6 в ряд.
+            '.dlna-grid{display:flex;flex-wrap:wrap;padding:0.6em 0.4em 0;}' +
+            '.dlna-card{width:16.6666%;box-sizing:border-box;padding:0 0.6em 1.4em;position:relative;}' +
             '.dlna-card__poster{position:relative;width:100%;padding-bottom:150%;border-radius:0.7em;overflow:hidden;background:rgba(255,255,255,0.07) center/cover no-repeat;}' +
             '.dlna-card__ph{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;opacity:0.35;}' +
             '.dlna-card__progress{height:0.32em;background:rgba(255,255,255,0.12);border-radius:0.16em;margin-top:0.4em;overflow:hidden;}' +
