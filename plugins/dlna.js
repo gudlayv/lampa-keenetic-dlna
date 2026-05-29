@@ -1228,6 +1228,75 @@
             return line;
         }
 
+        function renderShowCard(showEntry) {
+            var card = $('<div class="selector dlna-card dlna-card--show"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+            card.append(poster);
+
+            var title = $('<div class="dlna-card__title"></div>').text(showEntry.show);
+            card.append(title);
+            var meta = $('<div class="dlna-card__meta"></div>');
+            card.append(meta);
+
+            function metaText(rate) {
+                var seasonsN = showEntry.seasons.length;
+                var epsN = showEntry.totalEpisodes;
+                var parts = [];
+                if (seasonsN > 1) parts.push(seasonsN + ' ' + ruPlural(seasonsN, ['сезон', 'сезона', 'сезонов']));
+                parts.push(epsN + ' ' + ruPlural(epsN, ['серия', 'серии', 'серий']));
+                if (rate) parts.push('<span class="rate">★ ' + rate.toFixed(1) + '</span>');
+                return parts.join(' · ');
+            }
+            meta.html(metaText(null));
+
+            function applyTmdb(hit) {
+                if (!hit) { meta.html(metaText(null)); return; }
+                showEntry.tmdb = hit;
+                var name = hit.name || hit.original_name || showEntry.show;
+                title.text(name);
+                if (hit.poster_path) {
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(hit.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
+                }
+                meta.html(metaText(hit.vote_average));
+            }
+            // переиспользуем кешированный _tmdb первой серии, если есть
+            var cached = showEntry.seasons[0] && showEntry.seasons[0].episodes[0] && showEntry.seasons[0].episodes[0]._tmdb;
+            if (cached) applyTmdb(cached);
+            else tmdbSearch(showEntry.show, null, 'tv', applyTmdb);
+
+            function openSeason(seasonObj) {
+                var stack = getStack();
+                var tmdb = showEntry.tmdb || null;
+                var payload = seasonObj.episodes.map(function (e) {
+                    e._series = { show: showEntry.show, tmdb: tmdb, season: seasonObj.season };
+                    return e;
+                });
+                stack.push({
+                    kind: 'episodes',
+                    title: (tmdb ? (tmdb.name || tmdb.original_name) : showEntry.show) + ' · Сезон ' + seasonObj.season,
+                    payload: payload
+                });
+                self.openCurrent();
+            }
+
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () {
+                if (showEntry.seasons.length > 1) {
+                    getStack().push({
+                        kind: 'seasons',
+                        title: (showEntry.tmdb ? (showEntry.tmdb.name || showEntry.tmdb.original_name) : showEntry.show),
+                        show: showEntry
+                    });
+                    self.openCurrent();
+                } else {
+                    openSeason(showEntry.seasons[0]);
+                }
+            });
+            return card;
+        }
+
         function renderVideoRow(entry, episode, _card) {
             // hash: для TMDB-фильма Utils.hash(original_title), для серии — с season+episode,
             // иначе — fallback по url. После TMDB-резолва пересчитаем.
