@@ -1338,6 +1338,86 @@
             return line;
         }
 
+        function renderMovieCard(entry) {
+            var hash = fileHash(entry.url || entry.id || (entry.title || ''));
+            entry._hash = hash;
+            var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
+
+            var card = $('<div class="selector dlna-card dlna-card--movie" data-hash="' + hash + '"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_VIDEO + '</div>');
+            card.append(poster);
+
+            // прогресс-бар (0<percent<80) — под постером
+            var progress = $('<div class="dlna-card__progress" style="display:none;"><div style="width:0%;"></div></div>');
+            card.append(progress);
+
+            var title = $('<div class="dlna-card__title"></div>').text(entry.title);
+            card.append(title);
+            var meta = $('<div class="dlna-card__meta"></div>');
+            card.append(meta);
+
+            function renderMeta(opts) {
+                opts = opts || {};
+                var bits = [];
+                var watched = opts.percent >= 80;
+                var html = '';
+                if (watched) html += '<span class="watched">✓</span>';
+                if (opts.year) bits.push(opts.year);
+                bits.push('фильм');
+                if (opts.rate) bits.push('<span class="rate">★ ' + opts.rate.toFixed(1) + '</span>');
+                if (entry.resolution) bits.push(escapeHtml(entry.resolution));
+                meta.html(html + bits.join(' · '));
+            }
+
+            function applyProgress(tl) {
+                var pct = tl && tl.percent ? Math.min(100, tl.percent) : 0;
+                if (pct > 0 && pct < 80) {
+                    progress.show().find('div').css('width', pct + '%');
+                } else {
+                    progress.hide();
+                }
+            }
+
+            renderMeta({ percent: savedTl ? savedTl.percent : 0 });
+            applyProgress(savedTl);
+
+            function applyTmdb(hit) {
+                if (!hit) {
+                    var parsed = entry._parsed || parseFilename(entry.title);
+                    title.text(parsed.title || entry.title);
+                    renderMeta({ year: parsed.year, percent: (Lampa.Timeline.view(entry._hash) || {}).percent || 0 });
+                    return;
+                }
+                var tmdbTitle = hit.title || hit.original_title || entry.title;
+                var year = (hit.release_date || '').slice(0, 4);
+                title.text(tmdbTitle);
+                if (hit.poster_path) {
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(hit.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
+                }
+                entry.tmdb = hit;
+                var newHash = lampaHash(hit);
+                if (newHash) {
+                    entry._hash = newHash;
+                    card.attr('data-hash', newHash);
+                }
+                var tl = Lampa.Timeline.view(entry._hash);
+                renderMeta({ year: year, rate: hit.vote_average, percent: tl ? tl.percent : 0 });
+                applyProgress(tl);
+            }
+
+            if (entry._tmdb) applyTmdb(entry._tmdb);
+            else {
+                var p = entry._parsed || parseFilename(entry.title);
+                tmdbSearch(p.title, p.year, 'movie', applyTmdb);
+            }
+
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () { playEntry(entry, null); });
+            return card;
+        }
+
         function updateRowHash(line, info, entry, newHash) {
             entry._hash = newHash;
             line.attr('data-hash', newHash);
