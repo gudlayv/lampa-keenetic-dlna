@@ -1132,18 +1132,29 @@
             // снова свернет их в одну "Сезон 1 · 1 сер." → бесконечная вложенность.
             // Также пропускаем группировку на вкладке "movies" (там уже фильтр без серий).
             var top = stack[stack.length - 1];
-            var skipGroup = top.kind === 'episodes' || currentTab === 'movies';
-            var entries = skipGroup ? rawEntries : groupEpisodes(rawEntries);
 
-            if (!entries.length) {
-                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+            if (top.kind === 'episodes') {
+                // Экран серий — список (16:9-кадр + описание), как раньше
+                var eps = rawEntries;
+                if (!eps.length) {
+                    scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+                }
+                eps.forEach(function (entry) {
+                    var line = renderEntryRow(entry);
+                    line.on('hover:focus', function () { scroll.update(line); });
+                    scroll.append(line);
+                });
+            } else {
+                // Сетка карточек (Все / Фильмы / Сериалы / Папки)
+                var entries = groupShows(groupEpisodes(rawEntries));
+                if (!entries.length) {
+                    scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+                } else {
+                    var grid = $('<div class="dlna-grid"></div>');
+                    entries.forEach(function (entry) { grid.append(renderCard(entry)); });
+                    scroll.append(grid);
+                }
             }
-
-            entries.forEach(function (entry) {
-                var line = renderEntryRow(entry);
-                line.on('hover:focus', function () { scroll.update(line); });
-                scroll.append(line);
-            });
 
             self.activity.loader(false);
             if (!opts.skipControllerToggle) {
