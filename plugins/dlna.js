@@ -1339,9 +1339,10 @@
         }
 
         function renderMovieCard(entry) {
-            var hash = fileHash(entry.url || entry.id || (entry.title || ''));
+            var hash = fileHash(entry.url || entry.id || (entry.title || (Date.now() + '_' + Math.random())));
             entry._hash = hash;
-            var savedTl = (window.Lampa && Lampa.Timeline) ? Lampa.Timeline.view(hash) : null;
+            function tlView(h) { return (window.Lampa && Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(h) : null; }
+            var savedTl = tlView(hash);
 
             var card = $('<div class="selector dlna-card dlna-card--movie" data-hash="' + hash + '"></div>');
             var poster = $('<div class="dlna-card__poster"></div>');
@@ -1386,7 +1387,7 @@
                 if (!hit) {
                     var parsed = entry._parsed || parseFilename(entry.title);
                     title.text(parsed.title || entry.title);
-                    renderMeta({ year: parsed.year, percent: (Lampa.Timeline.view(entry._hash) || {}).percent || 0 });
+                    renderMeta({ year: parsed.year, percent: (tlView(entry._hash) || {}).percent || 0 });
                     return;
                 }
                 var tmdbTitle = hit.title || hit.original_title || entry.title;
@@ -1402,7 +1403,7 @@
                     entry._hash = newHash;
                     card.attr('data-hash', newHash);
                 }
-                var tl = Lampa.Timeline.view(entry._hash);
+                var tl = tlView(entry._hash);
                 renderMeta({ year: year, rate: hit.vote_average, percent: tl ? tl.percent : 0 });
                 applyProgress(tl);
             }
