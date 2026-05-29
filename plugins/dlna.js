@@ -215,6 +215,14 @@
         return n.toFixed(n < 10 ? 1 : 0) + ' ' + units[i];
     }
 
+    // Русская плюрализация: ruPlural(2, ['сезон','сезона','сезонов']) -> 'сезона'
+    function ruPlural(n, forms) {
+        var n10 = n % 10, n100 = n % 100;
+        if (n10 === 1 && n100 !== 11) return forms[0];
+        if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return forms[1];
+        return forms[2];
+    }
+
     // Парсим имя файла: пробуем выделить чистое название и год
     function parseFilename(name) {
         name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
@@ -422,6 +430,37 @@
             };
         });
         return virtual.concat(rest);
+    }
+
+    // Слой поверх groupEpisodes: виртуальные сезоны одного сериала сворачиваются
+    // в одну агрегат-карточку. Фильмы/папки проходят как есть, порядок сохраняется.
+    function groupShows(entries) {
+        var shows = {};
+        var result = [];
+        entries.forEach(function (entry) {
+            if (entry.isVirtualSeries) {
+                var key = entry.show.toLowerCase();
+                if (!shows[key]) {
+                    shows[key] = {
+                        isVirtualShow: true,
+                        show: entry.show,
+                        seasons: [],
+                        totalEpisodes: 0
+                    };
+                    result.push(shows[key]);
+                }
+                shows[key].seasons.push({ season: entry.season, episodes: entry.episodes });
+                shows[key].totalEpisodes += entry.episodes.length;
+            } else {
+                result.push(entry);
+            }
+        });
+        result.forEach(function (e) {
+            if (e.isVirtualShow) {
+                e.seasons.sort(function (a, b) { return a.season - b.season; });
+            }
+        });
+        return result;
     }
 
     // Параллельный пул с ограниченным concurrency. Каждая задача — функция (done).
