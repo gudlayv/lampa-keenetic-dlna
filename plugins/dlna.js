@@ -1232,9 +1232,6 @@
 
         function renderEntryRow(entry) {
             if (entry.isFolder) {
-                if (entry.isVirtualSeries) {
-                    return renderSeriesRow(entry);
-                }
                 var line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
                 line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
                 line.on('hover:enter', function () {
@@ -1244,66 +1241,6 @@
                 return line;
             }
             return renderVideoRow(entry, /*episode*/ entry._episode || null, /*card*/ null);
-        }
-
-        function renderSeriesRow(entry) {
-            // Виртуальная папка сериала+сезона
-            var line = $('<div class="selector dlna-row dlna-row--series" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
-            var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center;"></div>');
-            poster.html('<div style="opacity:0.4;">' + ICON_FOLDER + '</div>');
-            line.append(poster);
-
-            var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
-            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em;">' + escapeHtml(entry.show) + '</div>');
-            info.append('<div class="dlna-row__local" style="font-size:0.85em; opacity:0.7; margin-top:0.2em;">Сезон ' + entry.season + ' · ' + entry.episodes.length + ' серий</div>');
-            info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
-            line.append(info);
-
-            function applyTmdbSeries(hit) {
-                var box = info.find('.dlna-row__tmdb');
-                if (!hit) {
-                    box.text('TMDB: не найдено').css('color', '#888');
-                    return;
-                }
-                var name = hit.name || hit.original_name || entry.show;
-                var year = (hit.first_air_date || '').slice(0, 4);
-                info.find('.dlna-row__title').text(name + (year ? ' (' + year + ')' : ''));
-                var bits = [];
-                if (hit.vote_average) bits.push('<span style="color:#ffd966;">★ ' + hit.vote_average.toFixed(1) + '</span>');
-                if (hit.original_name && hit.original_name !== name) bits.push('<span style="opacity:0.7;">' + escapeHtml(hit.original_name) + '</span>');
-                box.html(bits.join(' · ') || '');
-                if (hit.poster_path) {
-                    poster.css({
-                        'background-image': 'url("' + tmdbPosterUrl(hit.poster_path, 'w200') + '")',
-                        'background-size': 'cover',
-                        'background-position': 'center'
-                    });
-                    poster.empty();
-                }
-                entry.tmdb = hit;
-            }
-
-            // Если IndexService уже разрезолвил серии — переиспользуем _tmdb
-            // первой серии вместо повторного TMDB-запроса.
-            var cachedSeriesTmdb = entry.episodes[0] && entry.episodes[0]._tmdb;
-            if (cachedSeriesTmdb) {
-                applyTmdbSeries(cachedSeriesTmdb);
-            } else {
-                tmdbSearch(entry.show, null, 'tv', applyTmdbSeries);
-            }
-
-            line.on('hover:enter', function () {
-                getStack().push({
-                    kind: 'episodes',
-                    title: (entry.tmdb ? (entry.tmdb.name || entry.tmdb.original_name) : entry.show) + ' · Сезон ' + entry.season,
-                    payload: entry.episodes.map(function (e) {
-                        e._series = entry;
-                        return e;
-                    })
-                });
-                self.openCurrent();
-            });
-            return line;
         }
 
         function renderShowCard(showEntry) {
