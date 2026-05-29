@@ -602,7 +602,7 @@ git commit -m "feat(grid): renderSeasonPicker + ветка kind:seasons в openC
                 var progress = card.find('.dlna-card__progress');
                 if (pct > 0 && pct < 80) {
                     if (!progress.length) {
-                        progress = $('<div class="dlna-card__progress"><div style="width:0%;"></div></div>');
+                        progress = $('<div class="dlna-card__progress" style="display:none;"><div style="width:0%;"></div></div>');
                         card.find('.dlna-card__poster').after(progress);
                     }
                     progress.show().find('div').css('width', pct + '%');
