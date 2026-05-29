@@ -1488,6 +1488,28 @@
             return card;
         }
 
+        function renderFolderCard(entry) {
+            var card = $('<div class="selector dlna-card dlna-card--folder"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+            card.append(poster);
+            card.append($('<div class="dlna-card__title"></div>').text(entry.title));
+            card.append('<div class="dlna-card__meta">папка</div>');
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () {
+                getStack().push({ id: entry.id, title: entry.title });
+                self.openCurrent();
+            });
+            return card;
+        }
+
+        // Диспетчер карточки в сетке (не на экране серий — там список через renderEntryRow).
+        function renderCard(entry) {
+            if (entry.isVirtualShow) return renderShowCard(entry);
+            if (entry.isFolder) return renderFolderCard(entry);
+            return renderMovieCard(entry);
+        }
+
         function updateRowHash(line, info, entry, newHash) {
             entry._hash = newHash;
             line.attr('data-hash', newHash);
