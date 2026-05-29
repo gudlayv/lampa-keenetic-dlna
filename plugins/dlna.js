@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.3';
+    var PLUGIN_VERSION = '0.10.4';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -224,8 +224,11 @@
     }
 
     // Парсим имя файла: пробуем выделить чистое название и год
+    // release/quality/codec/source-теги — мусор для TMDB-запроса
+    var MOVIE_JUNK = /[\s._\-(\[]+(\d{3,4}p\b|2160p|1080p|720p|480p|4k|4к|web[\s._\-]?dl|web-?rip|bd(remux|rip)?|hdrip|dvdrip|dcprip|hdtv|hdr|dv\b|sdr|hevc|x26[45]|h\.?26[45]|ddp?5|atmos|aac|ac3|amzn|nf\b|ma\b|dsnp|repack|proper|remux)/i;
     function parseFilename(name) {
         name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
+        name = name.replace(/^\[[^\]]+\][\s._\-]*/, ''); // ведущий release-group тег [NOOBDL]
         var yearMatch = name.match(/[._\s\-(](19|20)\d{2}[._\s\-)]/);
         if (yearMatch) {
             var idx = yearMatch.index;
@@ -233,7 +236,11 @@
             var title = name.substring(0, idx).replace(/[._]+/g, ' ').trim();
             return { title: title, year: year };
         }
-        return { title: name.replace(/[._]+/g, ' ').trim(), year: null };
+        // нет года — обрезаем по первому release/quality-тегу, иначе TMDB-запрос
+        // уходит грязным (напр. "8ban Deguchi 1080p WEB-DL x264" → ноль матчей).
+        var j = name.match(MOVIE_JUNK);
+        if (j && j.index > 0) name = name.slice(0, j.index);
+        return { title: name.replace(/[._]+/g, ' ').replace(/[\s\-]+$/, '').trim(), year: null };
     }
 
     // Срезаем release-group тег вида "[NovaFilm] " в начале и нормализуем разделители.
@@ -538,7 +545,7 @@
     // "Список серий". Поднимается на app:ready, кеш в Lampa.Storage.
 
     var INDEX_STORAGE_KEY = 'dlna_index_v1';
-    var INDEX_VERSION = 3; // 3: Video→Folders как корень дерева (фикс папки "Download")
+    var INDEX_VERSION = 4; // 4: чистка release/quality-тегов в имени фильма для TMDB
     var INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     // localStorage origin-quota обычно 5MB. На крупной DLNA-библиотеке
     // (5000+ файлов) сериализованный snapshot (entries + URL-карты)
