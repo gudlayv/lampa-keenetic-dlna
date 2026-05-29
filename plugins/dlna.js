@@ -215,6 +215,14 @@
         return n.toFixed(n < 10 ? 1 : 0) + ' ' + units[i];
     }
 
+    // Русская плюрализация: ruPlural(2, ['сезон','сезона','сезонов']) -> 'сезона'
+    function ruPlural(n, forms) {
+        var n10 = n % 10, n100 = n % 100;
+        if (n10 === 1 && n100 !== 11) return forms[0];
+        if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return forms[1];
+        return forms[2];
+    }
+
     // Парсим имя файла: пробуем выделить чистое название и год
     function parseFilename(name) {
         name = name.replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '');
@@ -422,6 +430,37 @@
             };
         });
         return virtual.concat(rest);
+    }
+
+    // Слой поверх groupEpisodes: виртуальные сезоны одного сериала сворачиваются
+    // в одну агрегат-карточку. Фильмы/папки проходят как есть, порядок сохраняется.
+    function groupShows(entries) {
+        var shows = {};
+        var result = [];
+        entries.forEach(function (entry) {
+            if (entry.isVirtualSeries) {
+                var key = entry.show.toLowerCase();
+                if (!shows[key]) {
+                    shows[key] = {
+                        isVirtualShow: true,
+                        show: entry.show,
+                        seasons: [],
+                        totalEpisodes: 0
+                    };
+                    result.push(shows[key]);
+                }
+                shows[key].seasons.push({ season: entry.season, episodes: entry.episodes });
+                shows[key].totalEpisodes += entry.episodes.length;
+            } else {
+                result.push(entry);
+            }
+        });
+        result.forEach(function (e) {
+            if (e.isVirtualShow) {
+                e.seasons.sort(function (a, b) { return a.season - b.season; });
+            }
+        });
+        return result;
     }
 
     // Параллельный пул с ограниченным concurrency. Каждая задача — функция (done).
@@ -990,6 +1029,11 @@
             scroll.clear();
             scroll.append($('<div style="padding:1em 1.2em; opacity:0.7;">Загрузка…</div>'));
 
+            if (top.kind === 'seasons') {
+                renderSeasonPicker(top, opts);
+                return;
+            }
+
             // Виртуальная группа эпизодов сериала — payload в стеке
             if (top.kind === 'episodes') {
                 var payload = top.payload || [];
@@ -1077,6 +1121,68 @@
             self.activity.loader(false);
         }
 
+        // Экран выбора сезона. top: { kind:'seasons', title, show }
+        function renderSeasonPicker(top, opts) {
+            opts = opts || {};
+            scroll.clear();
+            var stack = getStack();
+            var backBtn = $('<div class="selector" style="margin:0.4em 1em; padding:0.7em 1em; background:rgba(58,115,255,0.15); border-radius:0.5em;">' + ICON_BACK + 'Назад</div>');
+            backBtn.on('hover:enter', function () { stack.pop(); self.openCurrent(); });
+            backBtn.on('hover:focus', function () { scroll.update(backBtn); });
+            scroll.append(backBtn);
+
+            var showEntry = top.show;
+            var tmdb = showEntry.tmdb || null;
+            var grid = $('<div class="dlna-grid"></div>');
+
+            showEntry.seasons.forEach(function (seasonObj) {
+                var card = $('<div class="selector dlna-card dlna-card--season"></div>');
+                var poster = $('<div class="dlna-card__poster"></div>');
+                poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+                // fallback: общий постер сериала
+                if (tmdb && tmdb.poster_path) {
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(tmdb.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
+                }
+                card.append(poster);
+                card.append($('<div class="dlna-card__title"></div>').text('Сезон ' + seasonObj.season));
+                var epsN = seasonObj.episodes.length;
+                card.append($('<div class="dlna-card__meta"></div>').text(epsN + ' ' + ruPlural(epsN, ['серия', 'серии', 'серий'])));
+
+                // посезонный постер TMDB (если есть)
+                if (tmdb && tmdb.id != null) {
+                    tmdbSeason(tmdb.id, seasonObj.season, function (seasonData) {
+                        if (seasonData && seasonData.poster_path) {
+                            poster.css('background-image', 'url("' + tmdbPosterUrl(seasonData.poster_path, 'w300') + '")');
+                            poster.find('.dlna-card__ph').remove();
+                        }
+                    });
+                }
+
+                card.on('hover:focus', function () { scroll.update(card); });
+                card.on('hover:enter', function () {
+                    var payload = seasonObj.episodes.map(function (e) {
+                        e._series = { show: showEntry.show, tmdb: tmdb, season: seasonObj.season };
+                        return e;
+                    });
+                    stack.push({
+                        kind: 'episodes',
+                        title: (tmdb ? (tmdb.name || tmdb.original_name) : showEntry.show) + ' · Сезон ' + seasonObj.season,
+                        payload: payload
+                    });
+                    self.openCurrent();
+                });
+                grid.append(card);
+            });
+
+            scroll.append(grid);
+            self.activity.loader(false);
+            if (!opts.skipControllerToggle) {
+                self.activity.toggle();
+                Lampa.Controller.toggle('content');
+            }
+        }
+
         function renderEntries(rawEntries, opts) {
             opts = opts || {};
             scroll.clear();
@@ -1089,22 +1195,33 @@
                 scroll.append(backBtn);
             }
 
-            // Внутри виртуальной папки серии уже разобраны — повторная группировка
-            // снова свернет их в одну "Сезон 1 · 1 сер." → бесконечная вложенность.
-            // Также пропускаем группировку на вкладке "movies" (там уже фильтр без серий).
+            // Экран серий рисуем списком из готового payload (без повторной
+            // группировки — иначе серии снова свернет в "Сезон 1" и пойдет
+            // бесконечная вложенность). Остальные вкладки — сетка карточек.
             var top = stack[stack.length - 1];
-            var skipGroup = top.kind === 'episodes' || currentTab === 'movies';
-            var entries = skipGroup ? rawEntries : groupEpisodes(rawEntries);
 
-            if (!entries.length) {
-                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+            if (top.kind === 'episodes') {
+                // Экран серий — список (16:9-кадр + описание), как раньше
+                var eps = rawEntries;
+                if (!eps.length) {
+                    scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+                }
+                eps.forEach(function (entry) {
+                    var line = renderEntryRow(entry);
+                    line.on('hover:focus', function () { scroll.update(line); });
+                    scroll.append(line);
+                });
+            } else {
+                // Сетка карточек (Все / Фильмы / Сериалы / Папки)
+                var entries = groupShows(groupEpisodes(rawEntries));
+                if (!entries.length) {
+                    scroll.append($('<div style="padding:1.5em; opacity:0.6;">Папка пуста</div>'));
+                } else {
+                    var grid = $('<div class="dlna-grid"></div>');
+                    entries.forEach(function (entry) { grid.append(renderCard(entry)); });
+                    scroll.append(grid);
+                }
             }
-
-            entries.forEach(function (entry) {
-                var line = renderEntryRow(entry);
-                line.on('hover:focus', function () { scroll.update(line); });
-                scroll.append(line);
-            });
 
             self.activity.loader(false);
             if (!opts.skipControllerToggle) {
@@ -1115,9 +1232,6 @@
 
         function renderEntryRow(entry) {
             if (entry.isFolder) {
-                if (entry.isVirtualSeries) {
-                    return renderSeriesRow(entry);
-                }
                 var line = $('<div class="selector dlna-row dlna-row--folder" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
                 line.append('<div><b>' + ICON_FOLDER + escapeHtml(entry.title) + '</b></div>');
                 line.on('hover:enter', function () {
@@ -1129,64 +1243,73 @@
             return renderVideoRow(entry, /*episode*/ entry._episode || null, /*card*/ null);
         }
 
-        function renderSeriesRow(entry) {
-            // Виртуальная папка сериала+сезона
-            var line = $('<div class="selector dlna-row dlna-row--series" style="margin:0.3em 1em; padding:0.6em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em; display:flex; align-items:center; gap:0.9em;"></div>');
-            var poster = $('<div class="dlna-row__poster" style="flex:0 0 auto; width:4.5em; height:6.5em; border-radius:0.3em; background:rgba(255,255,255,0.08) center/cover no-repeat; display:flex; align-items:center; justify-content:center;"></div>');
-            poster.html('<div style="opacity:0.4;">' + ICON_FOLDER + '</div>');
-            line.append(poster);
+        function renderShowCard(showEntry) {
+            var card = $('<div class="selector dlna-card dlna-card--show"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+            card.append(poster);
 
-            var info = $('<div class="dlna-row__info" style="flex:1 1 auto; min-width:0;"></div>');
-            info.append('<div class="dlna-row__title" style="font-weight:600; font-size:1.05em;">' + escapeHtml(entry.show) + '</div>');
-            info.append('<div class="dlna-row__local" style="font-size:0.85em; opacity:0.7; margin-top:0.2em;">Сезон ' + entry.season + ' · ' + entry.episodes.length + ' серий</div>');
-            info.append('<div class="dlna-row__tmdb" style="font-size:0.82em; opacity:0.85; margin-top:0.3em; color:#ffd966;">ищу в TMDB…</div>');
-            line.append(info);
+            var title = $('<div class="dlna-card__title"></div>').text(showEntry.show);
+            card.append(title);
+            var meta = $('<div class="dlna-card__meta"></div>');
+            card.append(meta);
 
-            function applyTmdbSeries(hit) {
-                var box = info.find('.dlna-row__tmdb');
-                if (!hit) {
-                    box.text('TMDB: не найдено').css('color', '#888');
-                    return;
-                }
-                var name = hit.name || hit.original_name || entry.show;
-                var year = (hit.first_air_date || '').slice(0, 4);
-                info.find('.dlna-row__title').text(name + (year ? ' (' + year + ')' : ''));
-                var bits = [];
-                if (hit.vote_average) bits.push('<span style="color:#ffd966;">★ ' + hit.vote_average.toFixed(1) + '</span>');
-                if (hit.original_name && hit.original_name !== name) bits.push('<span style="opacity:0.7;">' + escapeHtml(hit.original_name) + '</span>');
-                box.html(bits.join(' · ') || '');
+            function metaText(rate) {
+                var seasonsN = showEntry.seasons.length;
+                var epsN = showEntry.totalEpisodes;
+                var parts = [];
+                if (seasonsN > 1) parts.push(seasonsN + ' ' + ruPlural(seasonsN, ['сезон', 'сезона', 'сезонов']));
+                parts.push(epsN + ' ' + ruPlural(epsN, ['серия', 'серии', 'серий']));
+                if (rate) parts.push('<span class="rate">★ ' + rate.toFixed(1) + '</span>');
+                return parts.join(' · ');
+            }
+            meta.html(metaText(null));
+
+            function applyTmdb(hit) {
+                if (!hit) { meta.html(metaText(null)); return; }
+                showEntry.tmdb = hit;
+                var name = hit.name || hit.original_name || showEntry.show;
+                title.text(name);
                 if (hit.poster_path) {
-                    poster.css({
-                        'background-image': 'url("' + tmdbPosterUrl(hit.poster_path, 'w200') + '")',
-                        'background-size': 'cover',
-                        'background-position': 'center'
-                    });
-                    poster.empty();
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(hit.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
                 }
-                entry.tmdb = hit;
+                meta.html(metaText(hit.vote_average));
             }
+            // переиспользуем кешированный _tmdb первой серии, если есть
+            var cached = showEntry.seasons[0] && showEntry.seasons[0].episodes[0] && showEntry.seasons[0].episodes[0]._tmdb;
+            if (cached) applyTmdb(cached);
+            else tmdbSearch(showEntry.show, null, 'tv', applyTmdb);
 
-            // Если IndexService уже разрезолвил серии — переиспользуем _tmdb
-            // первой серии вместо повторного TMDB-запроса.
-            var cachedSeriesTmdb = entry.episodes[0] && entry.episodes[0]._tmdb;
-            if (cachedSeriesTmdb) {
-                applyTmdbSeries(cachedSeriesTmdb);
-            } else {
-                tmdbSearch(entry.show, null, 'tv', applyTmdbSeries);
-            }
-
-            line.on('hover:enter', function () {
-                getStack().push({
+            function openSeason(seasonObj) {
+                var stack = getStack();
+                var tmdb = showEntry.tmdb || null;
+                var payload = seasonObj.episodes.map(function (e) {
+                    e._series = { show: showEntry.show, tmdb: tmdb, season: seasonObj.season };
+                    return e;
+                });
+                stack.push({
                     kind: 'episodes',
-                    title: (entry.tmdb ? (entry.tmdb.name || entry.tmdb.original_name) : entry.show) + ' · Сезон ' + entry.season,
-                    payload: entry.episodes.map(function (e) {
-                        e._series = entry;
-                        return e;
-                    })
+                    title: (tmdb ? (tmdb.name || tmdb.original_name) : showEntry.show) + ' · Сезон ' + seasonObj.season,
+                    payload: payload
                 });
                 self.openCurrent();
+            }
+
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () {
+                if (showEntry.seasons.length > 1) {
+                    getStack().push({
+                        kind: 'seasons',
+                        title: (showEntry.tmdb ? (showEntry.tmdb.name || showEntry.tmdb.original_name) : showEntry.show),
+                        show: showEntry
+                    });
+                    self.openCurrent();
+                } else {
+                    openSeason(showEntry.seasons[0]);
+                }
             });
-            return line;
+            return card;
         }
 
         function renderVideoRow(entry, episode, _card) {
@@ -1297,6 +1420,109 @@
 
             line.on('hover:enter', function () { playEntry(entry, episode); });
             return line;
+        }
+
+        function renderMovieCard(entry) {
+            var hash = fileHash(entry.url || entry.id || (entry.title || (Date.now() + '_' + Math.random())));
+            entry._hash = hash;
+            function tlView(h) { return (window.Lampa && Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(h) : null; }
+            var savedTl = tlView(hash);
+
+            var card = $('<div class="selector dlna-card dlna-card--movie" data-hash="' + hash + '"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_VIDEO + '</div>');
+            card.append(poster);
+
+            // прогресс-бар (0<percent<80) — под постером
+            var progress = $('<div class="dlna-card__progress" style="display:none;"><div style="width:0%;"></div></div>');
+            card.append(progress);
+
+            var title = $('<div class="dlna-card__title"></div>').text(entry.title);
+            card.append(title);
+            var meta = $('<div class="dlna-card__meta"></div>');
+            card.append(meta);
+
+            function renderMeta(opts) {
+                opts = opts || {};
+                var bits = [];
+                var watched = opts.percent >= 80;
+                var html = '';
+                if (watched) html += '<span class="watched">✓</span>';
+                if (opts.year) bits.push(opts.year);
+                bits.push('фильм');
+                if (opts.rate) bits.push('<span class="rate">★ ' + opts.rate.toFixed(1) + '</span>');
+                if (entry.resolution) bits.push(escapeHtml(entry.resolution));
+                meta.html(html + bits.join(' · '));
+            }
+
+            function applyProgress(tl) {
+                var pct = tl && tl.percent ? Math.min(100, tl.percent) : 0;
+                if (pct > 0 && pct < 80) {
+                    progress.show().find('div').css('width', pct + '%');
+                } else {
+                    progress.hide();
+                }
+            }
+
+            renderMeta({ percent: savedTl ? savedTl.percent : 0 });
+            applyProgress(savedTl);
+
+            function applyTmdb(hit) {
+                if (!hit) {
+                    var parsed = entry._parsed || parseFilename(entry.title);
+                    title.text(parsed.title || entry.title);
+                    renderMeta({ year: parsed.year, percent: (tlView(entry._hash) || {}).percent || 0 });
+                    return;
+                }
+                var tmdbTitle = hit.title || hit.original_title || entry.title;
+                var year = (hit.release_date || '').slice(0, 4);
+                title.text(tmdbTitle);
+                if (hit.poster_path) {
+                    poster.css('background-image', 'url("' + tmdbPosterUrl(hit.poster_path, 'w300') + '")');
+                    poster.find('.dlna-card__ph').remove();
+                }
+                entry.tmdb = hit;
+                var newHash = lampaHash(hit);
+                if (newHash) {
+                    entry._hash = newHash;
+                    card.attr('data-hash', newHash);
+                }
+                var tl = tlView(entry._hash);
+                renderMeta({ year: year, rate: hit.vote_average, percent: tl ? tl.percent : 0 });
+                applyProgress(tl);
+            }
+
+            if (entry._tmdb) applyTmdb(entry._tmdb);
+            else {
+                var p = entry._parsed || parseFilename(entry.title);
+                tmdbSearch(p.title, p.year, 'movie', applyTmdb);
+            }
+
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () { playEntry(entry, null); });
+            return card;
+        }
+
+        function renderFolderCard(entry) {
+            var card = $('<div class="selector dlna-card dlna-card--folder"></div>');
+            var poster = $('<div class="dlna-card__poster"></div>');
+            poster.append('<div class="dlna-card__ph">' + ICON_FOLDER + '</div>');
+            card.append(poster);
+            card.append($('<div class="dlna-card__title"></div>').text(entry.title));
+            card.append('<div class="dlna-card__meta">папка</div>');
+            card.on('hover:focus', function () { scroll.update(card); });
+            card.on('hover:enter', function () {
+                getStack().push({ id: entry.id, title: entry.title });
+                self.openCurrent();
+            });
+            return card;
+        }
+
+        // Диспетчер карточки в сетке (не на экране серий — там список через renderEntryRow).
+        function renderCard(entry) {
+            if (entry.isVirtualShow) return renderShowCard(entry);
+            if (entry.isFolder) return renderFolderCard(entry);
+            return renderMovieCard(entry);
         }
 
         function updateRowHash(line, info, entry, newHash) {
@@ -1424,6 +1650,34 @@
                     }
                 } else if (badge.length) {
                     badge.remove();
+                }
+            });
+
+            // Карточки фильмов в сетке
+            body.find('.dlna-card[data-hash]').each(function () {
+                var card = $(this);
+                var hash = card.attr('data-hash');
+                if (!hash) return;
+                var tl = Lampa.Timeline.view(hash);
+                if (!tl) return;
+                var pct = tl.percent ? Math.min(100, tl.percent) : 0;
+                var progress = card.find('.dlna-card__progress');
+                if (pct > 0 && pct < 80) {
+                    if (!progress.length) {
+                        progress = $('<div class="dlna-card__progress" style="display:none;"><div style="width:0%;"></div></div>');
+                        card.find('.dlna-card__poster').after(progress);
+                    }
+                    progress.show().find('div').css('width', pct + '%');
+                } else if (progress.length) {
+                    progress.hide();
+                }
+                // маркер просмотрено в мете
+                var meta = card.find('.dlna-card__meta');
+                var hasWatched = meta.find('.watched').length > 0;
+                if (pct >= 80 && !hasWatched) {
+                    meta.prepend('<span class="watched">✓</span>');
+                } else if (pct < 80 && hasWatched) {
+                    meta.find('.watched').remove();
                 }
             });
         }
@@ -1769,7 +2023,23 @@
             '.dlna-keenetic .selector.hover{background:rgba(255,255,255,0.18)!important;}' +
             // SVG — ограничиваем размер, иначе LAMPA-стили растягивают на 100%
             '.dlna-keenetic svg{width:1.2em!important;height:1.2em!important;flex:0 0 auto!important;display:inline-block!important;vertical-align:-0.2em!important;}' +
-            '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}';
+            '.dlna-keenetic .dlna-row__poster svg{width:2em!important;height:2em!important;}' +
+            // --- Карточная сетка ---
+            '.dlna-grid{display:flex;flex-wrap:wrap;gap:1.4em 1.2em;padding:0.6em 1em 1.4em;}' +
+            '.dlna-card{width:calc((100% - 4 * 1.2em) / 5);position:relative;}' +
+            '.dlna-card__poster{position:relative;width:100%;padding-bottom:150%;border-radius:0.7em;overflow:hidden;background:rgba(255,255,255,0.07) center/cover no-repeat;}' +
+            '.dlna-card__ph{position:absolute;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;opacity:0.35;}' +
+            '.dlna-card__progress{height:0.32em;background:rgba(255,255,255,0.12);border-radius:0.16em;margin-top:0.4em;overflow:hidden;}' +
+            '.dlna-card__progress > div{height:100%;background:#7ed957;}' +
+            '.dlna-card__title{font-size:1.02em;font-weight:600;line-height:1.2;margin-top:0.45em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}' +
+            '.dlna-card__meta{font-size:0.82em;opacity:0.72;margin-top:0.2em;}' +
+            '.dlna-card__meta .rate{color:#ffd966;}' +
+            '.dlna-card__meta .watched{color:#7ed957;margin-right:0.35em;font-weight:bold;}' +
+            // Фокус: рамка на постере через box-shadow, без transition/scale (Tizen WebKit 76).
+            // Сама плитка фон не подсвечивает — перебиваем общий .selector.focus.
+            '.dlna-keenetic .dlna-card.focus,.dlna-keenetic .dlna-card.hover{background:transparent!important;}' +
+            '.dlna-keenetic .dlna-card.focus .dlna-card__poster,.dlna-keenetic .dlna-card.hover .dlna-card__poster{box-shadow:0 0 0 0.22em #fff;}' +
+            '.dlna-keenetic .dlna-card__ph svg{width:2.4em!important;height:2.4em!important;}';
         document.head.appendChild(style);
     }
 
