@@ -1715,6 +1715,34 @@
                     badge.remove();
                 }
             });
+
+            // Карточки фильмов в сетке
+            body.find('.dlna-card[data-hash]').each(function () {
+                var card = $(this);
+                var hash = card.attr('data-hash');
+                if (!hash) return;
+                var tl = Lampa.Timeline.view(hash);
+                if (!tl) return;
+                var pct = tl.percent ? Math.min(100, tl.percent) : 0;
+                var progress = card.find('.dlna-card__progress');
+                if (pct > 0 && pct < 80) {
+                    if (!progress.length) {
+                        progress = $('<div class="dlna-card__progress"><div style="width:0%;"></div></div>');
+                        card.find('.dlna-card__poster').after(progress);
+                    }
+                    progress.show().find('div').css('width', pct + '%');
+                } else if (progress.length) {
+                    progress.hide();
+                }
+                // маркер просмотрено в мете
+                var meta = card.find('.dlna-card__meta');
+                var hasWatched = meta.find('.watched').length > 0;
+                if (pct >= 80 && !hasWatched) {
+                    meta.prepend('<span class="watched">✓</span>');
+                } else if (pct < 80 && hasWatched) {
+                    meta.find('.watched').remove();
+                }
+            });
         }
 
         this.pause = function () {};
