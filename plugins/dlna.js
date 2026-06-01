@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.10.5';
+    var PLUGIN_VERSION = '0.11.0';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -519,6 +519,20 @@
             }
         });
         return result;
+    }
+
+    // Категория тайтла для фильтра. Источник жанра — entry._tmdb (результат
+    // search/movie|tv, несет genre_ids + original_language). Анимация = жанр 16;
+    // аниме = анимация + язык оригинала ja (приоритет над мульт-категориями).
+    // Без TMDB-матча — fallback на movies/series по наличию _episode.
+    function entryCategory(e) {
+        var tmdb = e._tmdb;
+        var anim = !!(tmdb && tmdb.genre_ids && tmdb.genre_ids.indexOf(16) !== -1);
+        var anime = anim && tmdb.original_language === 'ja';
+        var series = !!e._episode;
+        if (anime) return 'anime';
+        if (anim) return series ? 'cartoonseries' : 'cartoonmovies';
+        return series ? 'series' : 'movies';
     }
 
     // Параллельный пул с ограниченным concurrency. Каждая задача — функция (done).
@@ -1053,10 +1067,13 @@
     }
 
     var TABS = [
-        { id: 'all',     title: 'Все' },
-        { id: 'movies',  title: 'Фильмы' },
-        { id: 'series',  title: 'Сериалы' },
-        { id: 'folders', title: 'Папки' }
+        { id: 'all',           title: 'Все' },
+        { id: 'movies',        title: 'Фильмы' },
+        { id: 'series',        title: 'Сериалы' },
+        { id: 'cartoonmovies', title: 'Мультфильмы' },
+        { id: 'cartoonseries', title: 'Мультсериалы' },
+        { id: 'anime',         title: 'Аниме' },
+        { id: 'folders',       title: 'Папки' }
     ];
 
     // Универсальный плеер для DLNA-entry с TMDB-карточкой.
@@ -1132,10 +1149,13 @@
     function Component() {
         var currentTab = 'all';
         var stacks = {
-            all:     [{ kind: 'all',     title: 'Все видео' }],
-            movies:  [{ kind: 'movies',  title: 'Фильмы' }],
-            series:  [{ kind: 'series',  title: 'Сериалы' }],
-            folders: [{ id: '0',         title: 'Keenetic Ultra' }]
+            all:           [{ kind: 'all',           title: 'Все видео' }],
+            movies:        [{ kind: 'movies',        title: 'Фильмы' }],
+            series:        [{ kind: 'series',        title: 'Сериалы' }],
+            cartoonmovies: [{ kind: 'cartoonmovies', title: 'Мультфильмы' }],
+            cartoonseries: [{ kind: 'cartoonseries', title: 'Мультсериалы' }],
+            anime:         [{ kind: 'anime',         title: 'Аниме' }],
+            folders:       [{ id: '0',               title: 'Keenetic Ultra' }]
         };
         var html, head, filter, filterItems, body, scroll, self = this;
 
@@ -1288,10 +1308,12 @@
                     var da = a.date || '', db = b.date || '';
                     return db.localeCompare(da);
                 });
-                if (currentTab === 'movies') {
-                    entries = entries.filter(function (e) { return !e.isFolder && !e._episode; });
-                } else if (currentTab === 'series') {
-                    entries = entries.filter(function (e) { return !e.isFolder && e._episode; });
+                if (currentTab !== 'all') {
+                    entries = entries.filter(function (e) {
+                        return !e.isFolder && entryCategory(e) === currentTab;
+                    });
+                } else {
+                    entries = entries.filter(function (e) { return !e.isFolder; });
                 }
                 renderEntries(entries, opts);
             };

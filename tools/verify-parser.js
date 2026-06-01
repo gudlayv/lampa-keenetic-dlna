@@ -32,7 +32,8 @@ eval([
     extract('FOLDER_CUT', 'var'), extract('FOLDER_SEASON', 'var'),
     extract('cleanShow'), extract('parseFilename'),
     extract('normKey'), extract('strictPrefix'), extract('cleanFolderTitle'),
-    extract('folderSeason'), extract('episodeNum'), extract('episodeSeasonFromFile')
+    extract('folderSeason'), extract('episodeNum'), extract('episodeSeasonFromFile'),
+    extract('entryCategory')
 ].join('\n'));
 
 // --- фикстура: { folderName: [files...] } + standalone files ---
@@ -99,5 +100,20 @@ ok(!movies.some(m => /серия|Парадокс/.test(m)), 'серии не у
 ok(movies.length === 2, 'ровно 2 фильма (Apex, Prada 2006), got ' + movies.length);
 
 console.log('\nИтог: ' + Object.keys(shows).length + ' шоу, ' + movies.length + ' фильмов.');
+
+// --- entryCategory: классификация по жанру TMDB (анимация=16, аниме=16+ja) ---
+console.log('\nПроверка entryCategory (фильтр по категориям):');
+const ep = { show: 'X', season: 1, episode: 1 };
+const tmdb = (genres, lang) => ({ genre_ids: genres, original_language: lang });
+function cat(e) { return entryCategory(e); }
+ok(cat({ _tmdb: tmdb([18, 53], 'en') }) === 'movies', 'фильм без жанра 16 → movies');
+ok(cat({ _episode: ep, _tmdb: tmdb([18], 'en') }) === 'series', 'сериал без жанра 16 → series');
+ok(cat({ _tmdb: tmdb([16, 12], 'en') }) === 'cartoonmovies', 'фильм с жанром 16 (en) → cartoonmovies');
+ok(cat({ _episode: ep, _tmdb: tmdb([16], 'en') }) === 'cartoonseries', 'сериал с жанром 16 (en) → cartoonseries');
+ok(cat({ _tmdb: tmdb([16], 'ja') }) === 'anime', 'фильм с жанром 16 + ja → anime');
+ok(cat({ _episode: ep, _tmdb: tmdb([16, 10759], 'ja') }) === 'anime', 'сериал с жанром 16 + ja → anime');
+ok(cat({}) === 'movies', 'без _tmdb и _episode → movies (fallback)');
+ok(cat({ _episode: ep }) === 'series', 'без _tmdb, есть _episode → series (fallback)');
+
 if (failed) { console.error('\nРЕГРЕСС: ' + failed + ' проверок упало.'); process.exit(1); }
 console.log('Все проверки пройдены.');
