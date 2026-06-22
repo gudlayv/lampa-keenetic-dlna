@@ -2353,7 +2353,7 @@
         // Один RPC-вызов с обработкой 409 (CSRF session-id) и basic-auth.
         // onDone(arguments), onFail({ reason, ... }) — reason-коды стабильны:
         // auth | network | forbidden | server | rpc | parse | no_proxy.
-        function rpc(method, args, onDone, onFail, _retried) {
+        function rpc(method, args, onDone, onFail, timeoutMs, _retried) {
             var url = rpcUrl();
             if (!url) { onFail({ reason: 'no_proxy' }); return; }
             var xhr = new XMLHttpRequest();
@@ -2362,13 +2362,13 @@
             var auth = basicAuthHeader();
             if (auth) xhr.setRequestHeader('Authorization', auth);
             if (sessionId) xhr.setRequestHeader('X-Transmission-Session-Id', sessionId);
-            xhr.timeout = 15000;
+            xhr.timeout = timeoutMs || 15000;
             xhr.onreadystatechange = function () {
                 if (xhr.readyState !== 4) return;
                 var sid = xhr.getResponseHeader('X-Transmission-Session-Id');
                 if (xhr.status === 409 && sid && !_retried) {
                     sessionId = sid;
-                    rpc(method, args, onDone, onFail, true);
+                    rpc(method, args, onDone, onFail, timeoutMs, true);
                     return;
                 }
                 if (xhr.status === 401) { onFail({ reason: 'auth' }); return; }
@@ -2402,7 +2402,7 @@
                 }, onFail);
             },
             ping: function (onDone, onFail) {
-                rpc('session-stats', {}, onDone || function () {}, onFail || function () {});
+                rpc('session-stats', {}, onDone || function () {}, onFail || function () {}, 8000);
             },
             list: function (onDone, onFail) {
                 onDone = onDone || function () {};
