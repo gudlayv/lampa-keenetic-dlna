@@ -2284,6 +2284,51 @@
     // запроса. Для совместимости со стандартным Transmission реализована fallback-
     // ветка на 409→retry с X-Transmission-Session-Id. Используем XHR, потому что
     // Lampa.Reguest не пробрасывает HTTP-статус и custom response-headers.
+    // Нормализация имени для матча DLNA-файла с торрентом Transmission:
+    // срезаем расширение, разделители .[_-] → пробел, в lower-case.
+    function normTorrentName(s) {
+        return String(s || '')
+            .toLowerCase()
+            .replace(/\.[a-z0-9]{2,4}$/, '')
+            .replace(/[._\-\s]+/g, ' ')
+            .trim();
+    }
+
+    /**
+     * Ищет торрент в списке torrent-get, которому принадлежит DLNA-файл.
+     * Матч: нормализованное имя файла == нормализованному torrent.name или
+     * basename любого files[].name; либо одно содержит другое (overlap ≥ 6,
+     * чтобы короткие имена не давали ложных). Возврат { id, name } | null.
+     */
+    function findTorrentForFile(fileTitle, list) {
+        if (!fileTitle || !Array.isArray(list)) return null;
+        var target = normTorrentName(fileTitle);
+        if (target.length < 3) return null;
+        function basename(p) {
+            var s = String(p || '');
+            var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+            return i >= 0 ? s.slice(i + 1) : s;
+        }
+        var best = null;
+        for (var i = 0; i < list.length; i++) {
+            var t = list[i] || {};
+            var cands = [t.name];
+            if (Array.isArray(t.files)) {
+                for (var j = 0; j < t.files.length; j++) cands.push(basename(t.files[j] && t.files[j].name));
+            }
+            for (var c = 0; c < cands.length; c++) {
+                var n = normTorrentName(cands[c]);
+                if (n.length < 3) continue;
+                if (n === target) return { id: t.id, name: t.name };
+                if (n.indexOf(target) >= 0 || target.indexOf(n) >= 0) {
+                    var overlap = Math.min(n.length, target.length);
+                    if (overlap >= 6 && (!best || overlap > best.overlap)) best = { id: t.id, name: t.name, overlap: overlap };
+                }
+            }
+        }
+        return best ? { id: best.id, name: best.name } : null;
+    }
+
     var TransmissionClient = (function () {
         var sessionId = null;
 
