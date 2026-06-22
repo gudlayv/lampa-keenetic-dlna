@@ -1461,7 +1461,7 @@
 
         function openDownloadMenu(t) {
             Lampa.Select.show({
-                title: t.name || 'Закачка',
+                title: escapeHtml(t.name || 'Закачка'),
                 items: [
                     { title: 'Отменить закачку (удалить файл)', _act: 'del' },
                     { title: 'Отменить, файл оставить', _act: 'keep' },
@@ -1477,7 +1477,7 @@
 
         function confirmRemove(t, deleteLocal) {
             Lampa.Select.show({
-                title: 'Точно отменить «' + (t.name || '') + '»?',
+                title: 'Точно отменить «' + escapeHtml(t.name || '') + '»?',
                 items: [{ title: 'Да, отменить', _yes: true }, { title: 'Назад', _yes: false }],
                 onSelect: function (a) {
                     if (!a._yes) { Lampa.Controller.toggle('content'); return; }
@@ -1494,6 +1494,8 @@
             });
         }
 
+        // Патчим строки на месте по data-tid: полный ре-рендер каждые 4с угонял бы
+        // фокус пульта с текущей строки. Обновляем innerHTML существующей .dlna-row.
         function paintDownloads(torrents) {
             var existing = {};
             scroll.render().find('.dlna-row[data-tid]').each(function () { existing[$(this).attr('data-tid')] = this; });
@@ -1509,13 +1511,22 @@
                 if (el) $(el).html(downloadRowHtml(t));
                 else scroll.append(renderDownloadRow(t));
             });
-            Object.keys(existing).forEach(function (id) { if (!seen[id]) $(existing[id]).remove(); });
+            var focusLost = false;
+            Object.keys(existing).forEach(function (id) {
+                if (seen[id]) return;
+                var el = existing[id];
+                if (el && el.className && el.className.indexOf('focus') >= 0) focusLost = true;
+                $(el).remove();
+            });
+            // Удаленная под фокусом строка оставляет контроллер с висячей ссылкой —
+            // пере-синхронизируем коллекцию, иначе навигация пультом застревает.
+            if (focusLost) Lampa.Controller.toggle('content');
         }
 
         function renderDownloads(opts) {
             opts = opts || {};
             stopDownloadsPoll();
-            if (!trAddr()) {
+            if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
                 scroll.clear();
                 var msg = $('<div style="margin:1em; padding:1.2em; background:rgba(255,217,102,0.15); border-left:4px solid #ffd966; border-radius:0.4em; line-height:1.5;"></div>');
                 msg.html('<b>Transmission не настроен</b><br><br>Открой <b>Настройки → Keenetic DLNA</b> и заполни <b>Transmission RPC</b>.');
@@ -1542,6 +1553,8 @@
                         first = false;
                         if (!opts.skipControllerToggle) { self.activity.toggle(); Lampa.Controller.toggle('content'); }
                     }
+                    // Ошибку повторного тика глушим намеренно: не перетираем фокус
+                    // на списке; данные остаются последними успешными.
                 });
             };
             load();
