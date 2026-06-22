@@ -1073,7 +1073,8 @@
         { id: 'cartoonmovies', title: 'Мультфильмы' },
         { id: 'cartoonseries', title: 'Мультсериалы' },
         { id: 'anime',         title: 'Аниме' },
-        { id: 'folders',       title: 'Папки' }
+        { id: 'folders',       title: 'Папки' },
+        { id: 'downloads',     title: 'Закачки' }
     ];
 
     // Универсальный плеер для DLNA-entry с TMDB-карточкой.
@@ -1155,7 +1156,8 @@
             cartoonmovies: [{ kind: 'cartoonmovies', title: 'Мультфильмы' }],
             cartoonseries: [{ kind: 'cartoonseries', title: 'Мультсериалы' }],
             anime:         [{ kind: 'anime',         title: 'Аниме' }],
-            folders:       [{ id: '0',               title: 'Keenetic Ultra' }]
+            folders:       [{ id: '0',               title: 'Keenetic Ultra' }],
+            downloads:     [{ kind: 'downloads', title: 'Закачки' }]
         };
         var html, head, filter, filterItems, body, scroll, self = this;
 
@@ -1205,6 +1207,7 @@
                 filterItems.forEach(function (i) { i.selected = i.tabId === item.tabId; });
                 currentTab = item.tabId;
                 updateFilterBadge();
+                stopDownloadsPoll();
                 reloadCurrent();
                 // Lampa.Select.hide() при выборе закрывает popup но не возвращает
                 // controller — фокус "висит" в скрытом select. Через setTimeout(0)
@@ -1249,6 +1252,7 @@
         // Перезагрузить текущую вкладку без перетоггливания controllers
         // (вызывается из filter.onSelect — Lampa.Select сам управляет фокусом)
         function reloadCurrent() {
+            stopDownloadsPoll();
             self.openCurrent({ skipControllerToggle: true });
         }
 
@@ -1262,6 +1266,11 @@
 
             if (top.kind === 'seasons') {
                 renderSeasonPicker(top, opts);
+                return;
+            }
+
+            if (top.kind === 'downloads') {
+                renderDownloads(opts);
                 return;
             }
 
@@ -1414,6 +1423,133 @@
                 self.activity.toggle();
                 Lampa.Controller.toggle('content');
             }
+        }
+
+        var DL_STATUS = { 0: 'на паузе', 1: 'проверка', 2: 'проверка', 3: 'в очереди', 4: 'качается', 5: 'в очереди', 6: 'раздается' };
+
+        function fmtSpeed(bps) {
+            if (!bps || bps < 1) return '';
+            var mb = bps / 1048576;
+            if (mb >= 1) return '↓ ' + mb.toFixed(1) + ' МБ/с';
+            return '↓ ' + Math.round(bps / 1024) + ' КБ/с';
+        }
+        function fmtEta(sec) {
+            if (sec == null || sec < 0) return '';
+            if (sec < 60) return 'ETA ' + sec + ' с';
+            if (sec < 3600) return 'ETA ' + Math.round(sec / 60) + ' мин';
+            return 'ETA ' + Math.round(sec / 3600) + ' ч';
+        }
+
+        function downloadRowHtml(t) {
+            var pct = Math.round((t.percentDone || 0) * 100);
+            var bits = [DL_STATUS[t.status] || ''];
+            var sp = fmtSpeed(t.rateDownload); if (sp) bits.push(sp);
+            var eta = fmtEta(t.eta); if (eta) bits.push(eta);
+            return '<div class="dlna-row__title"><b>' + escapeHtml(t.name || '') + '</b></div>' +
+                '<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;">' +
+                '<div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, pct) + '%;"></div></div>' +
+                '<div class="dlna-row__meta" style="margin-top:0.3em; opacity:0.7; font-size:0.85em;">' + pct + '% · ' + bits.filter(Boolean).join(' · ') + '</div>';
+        }
+
+        function renderDownloadRow(t) {
+            var row = $('<div class="selector dlna-row" data-tid="' + t.id + '" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
+            row.html(downloadRowHtml(t));
+            row.on('hover:focus', function () { scroll.update(row); });
+            row.on('hover:enter', function () { openDownloadMenu(t); });
+            return row;
+        }
+
+        function openDownloadMenu(t) {
+            Lampa.Select.show({
+                title: t.name || 'Закачка',
+                items: [
+                    { title: 'Отменить закачку (удалить файл)', _act: 'del' },
+                    { title: 'Отменить, файл оставить', _act: 'keep' },
+                    { title: 'Закрыть', _act: 'close' }
+                ],
+                onSelect: function (a) {
+                    if (a._act === 'close') { Lampa.Controller.toggle('content'); return; }
+                    confirmRemove(t, a._act === 'del');
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function confirmRemove(t, deleteLocal) {
+            Lampa.Select.show({
+                title: 'Точно отменить «' + (t.name || '') + '»?',
+                items: [{ title: 'Да, отменить', _yes: true }, { title: 'Назад', _yes: false }],
+                onSelect: function (a) {
+                    if (!a._yes) { Lampa.Controller.toggle('content'); return; }
+                    TransmissionClient.remove([t.id], deleteLocal, function () {
+                        Lampa.Noty.show('Закачка отменена');
+                        scroll.render().find('[data-tid="' + t.id + '"]').remove();
+                        Lampa.Controller.toggle('content');
+                    }, function (err) {
+                        Lampa.Noty.show('Не удалось отменить: ' + (err && err.reason || 'ошибка'));
+                        Lampa.Controller.toggle('content');
+                    });
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function paintDownloads(torrents) {
+            var existing = {};
+            scroll.render().find('.dlna-row[data-tid]').each(function () { existing[$(this).attr('data-tid')] = this; });
+            if (!torrents.length) {
+                scroll.clear();
+                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Нет активных закачек</div>'));
+                return;
+            }
+            var seen = {};
+            torrents.forEach(function (t) {
+                seen[t.id] = true;
+                var el = existing[String(t.id)];
+                if (el) $(el).html(downloadRowHtml(t));
+                else scroll.append(renderDownloadRow(t));
+            });
+            Object.keys(existing).forEach(function (id) { if (!seen[id]) $(existing[id]).remove(); });
+        }
+
+        function renderDownloads(opts) {
+            opts = opts || {};
+            stopDownloadsPoll();
+            if (!trAddr()) {
+                scroll.clear();
+                var msg = $('<div style="margin:1em; padding:1.2em; background:rgba(255,217,102,0.15); border-left:4px solid #ffd966; border-radius:0.4em; line-height:1.5;"></div>');
+                msg.html('<b>Transmission не настроен</b><br><br>Открой <b>Настройки → Keenetic DLNA</b> и заполни <b>Transmission RPC</b>.');
+                scroll.append(msg);
+                self.activity.loader(false);
+                if (!opts.skipControllerToggle) { self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                return;
+            }
+            var first = true;
+            var toggled = false;
+            var load = function () {
+                TransmissionClient.list(function (torrents) {
+                    if (first) { scroll.clear(); first = false; }
+                    paintDownloads(torrents);
+                    self.activity.loader(false);
+                    if (!toggled && !opts.skipControllerToggle) { toggled = true; self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                }, function (err) {
+                    if (first) {
+                        scroll.clear();
+                        var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em;"></div>');
+                        box.append('<b>Ошибка Transmission:</b> ' + escapeHtml((err && err.reason) || 'unknown'));
+                        scroll.append(box);
+                        self.activity.loader(false);
+                        first = false;
+                        if (!opts.skipControllerToggle) { self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                    }
+                });
+            };
+            load();
+            self._dlTimer = setInterval(load, 4000);
+        }
+
+        function stopDownloadsPoll() {
+            if (self._dlTimer) { clearInterval(self._dlTimer); self._dlTimer = null; }
         }
 
         function renderEntries(rawEntries, opts) {
@@ -1916,9 +2052,10 @@
             });
         }
 
-        this.pause = function () {};
+        this.pause = function () { stopDownloadsPoll(); };
         this.stop = function () {};
         this.destroy = function () {
+            stopDownloadsPoll();
             self._destroyed = true;
             // Парный remove к follow в create() — иначе после N push/pop
             // в шине dlna_index копятся мертвые closures, каждое событие
