@@ -1882,6 +1882,8 @@
 
             card.on('hover:focus', function () { scroll.update(card); });
             card.on('hover:enter', function () { playEntry(entry, null); });
+            // Lampa шлет либо hover:long, либо hover:enter (по длительности нажатия),
+            // не оба — поэтому меню удаления не конфликтует с запуском плеера.
             card.on('hover:long', function () {
                 Lampa.Select.show({
                     title: escapeHtml(entry.title || 'Фильм'),
@@ -1930,6 +1932,12 @@
             }
         }
 
+        /**
+         * Удаление файла с диска роутера. Прямого API удаления у MiniDLNA нет,
+         * поэтому идем через Transmission: torrent-remove + delete-local-data.
+         * Работает только для файлов, которые еще числятся раздачей; из выдачи
+         * DLNA запись пропадает не сразу, а после ресканирования MiniDLNA.
+         */
         function deleteMovieFile(entry, card) {
             if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
                 Lampa.Noty.show('Transmission не настроен — удаление недоступно');
