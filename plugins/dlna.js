@@ -1882,6 +1882,17 @@
 
             card.on('hover:focus', function () { scroll.update(card); });
             card.on('hover:enter', function () { playEntry(entry, null); });
+            card.on('hover:long', function () {
+                Lampa.Select.show({
+                    title: escapeHtml(entry.title || 'Фильм'),
+                    items: [{ title: 'Удалить с диска', _act: 'del' }, { title: 'Закрыть', _act: 'close' }],
+                    onSelect: function (a) {
+                        if (a._act !== 'del') { Lampa.Controller.toggle('content'); return; }
+                        deleteMovieFile(entry, card);
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            });
             return card;
         }
 
@@ -1917,6 +1928,41 @@
                 var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, tl.percent) + '%;"></div></div>');
                 info.append(bar);
             }
+        }
+
+        function deleteMovieFile(entry, card) {
+            if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
+                Lampa.Noty.show('Transmission не настроен — удаление недоступно');
+                Lampa.Controller.toggle('content');
+                return;
+            }
+            TransmissionClient.list(function (list) {
+                var hit = findTorrentForFile(entry.title, list);
+                if (!hit) {
+                    Lampa.Noty.show('Не нашел раздачу для файла в Transmission — удалить можно только через web-UI роутера');
+                    Lampa.Controller.toggle('content');
+                    return;
+                }
+                Lampa.Select.show({
+                    title: 'Удалить «' + escapeHtml(hit.name) + '» с диска?',
+                    items: [{ title: 'Да, удалить', _yes: true }, { title: 'Назад', _yes: false }],
+                    onSelect: function (a) {
+                        if (!a._yes) { Lampa.Controller.toggle('content'); return; }
+                        TransmissionClient.remove([hit.id], true, function () {
+                            Lampa.Noty.show('Удалено. Обновите список — MiniDLNA уберет фильм после ресканирования');
+                            if (card) card.remove();
+                            Lampa.Controller.toggle('content');
+                        }, function (err) {
+                            Lampa.Noty.show('Не удалось удалить: ' + (err && err.reason || 'ошибка'));
+                            Lampa.Controller.toggle('content');
+                        });
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            }, function (err) {
+                Lampa.Noty.show('Ошибка Transmission: ' + (err && err.reason || 'unknown'));
+                Lampa.Controller.toggle('content');
+            });
         }
 
         function playEntry(entry, episode) {
