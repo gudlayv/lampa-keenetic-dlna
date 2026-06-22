@@ -24,7 +24,9 @@ function ok(cond, msg) { if (!cond) { console.error('  ❌', msg); failed++; } e
 const list = [
     { id: 11, name: 'Apex.2026.2160p.NF.WEB-DL', files: [{ name: 'Apex.2026.2160p.NF.WEB-DL.mkv' }] },
     { id: 12, name: 'The.Devil.Wears.Prada.2006.2160p.WEB-DL', files: [{ name: 'The.Devil.Wears.Prada.2006.2160p.WEB-DL.mkv' }] },
-    { id: 13, name: 'Common.Side.Effects.S01', files: [{ name: 'S01E01 Pilot.mkv' }, { name: 'S01E02 Lakeshore Limited.mkv' }] }
+    { id: 13, name: 'Common.Side.Effects.S01', files: [{ name: 'S01E01 Pilot.mkv' }, { name: 'S01E02 Lakeshore Limited.mkv' }] },
+    { id: 14, name: 'Avatar 2009', files: [{ name: 'Avatar.2009.1080p.mkv' }] },
+    { id: 15, name: 'Avataria Adventures', files: [{ name: 'Avataria.Adventures.mkv' }] }
 ];
 
 console.log('Проверка findTorrentForFile:');
@@ -34,6 +36,8 @@ ok(findTorrentForFile('S01E02 Lakeshore Limited.mkv', list).id === 13, 'матч
 ok(findTorrentForFile('Совершенно.Другой.Фильм.2099.mkv', list) === null, 'нет ложного матча на чужой файл');
 ok(findTorrentForFile('', list) === null, 'пустой ввод → null');
 ok(findTorrentForFile('a.mkv', list) === null, 'слишком короткое имя → null (без ложного)');
+ok(findTorrentForFile('Avatar', list).id === 14, 'короткое имя по границе слова → Avatar (id 14), не Avataria');
+ok(findTorrentForFile('Apex 2026', list).id === 11, 'год сохраняется в нормализации (Apex 2026 матчит exact)');
 
 if (failed) { console.error('\nРЕГРЕСС: ' + failed + ' проверок упало.'); process.exit(1); }
 console.log('Все проверки пройдены.');

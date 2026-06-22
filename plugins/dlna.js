@@ -2284,12 +2284,13 @@
     // запроса. Для совместимости со стандартным Transmission реализована fallback-
     // ветка на 409→retry с X-Transmission-Session-Id. Используем XHR, потому что
     // Lampa.Reguest не пробрасывает HTTP-статус и custom response-headers.
-    // Нормализация имени для матча DLNA-файла с торрентом Transmission:
-    // срезаем расширение, разделители .[_-] → пробел, в lower-case.
+
+    // Канонизация имени, чтобы очищенный DLNA-заголовок и имя раздачи Transmission
+    // сравнивались как равные несмотря на регистр и разделители (._-).
     function normTorrentName(s) {
         return String(s || '')
             .toLowerCase()
-            .replace(/\.[a-z0-9]{2,4}$/, '')
+            .replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '')
             .replace(/[._\-\s]+/g, ' ')
             .trim();
     }
@@ -2320,7 +2321,11 @@
                 var n = normTorrentName(cands[c]);
                 if (n.length < 3) continue;
                 if (n === target) return { id: t.id, name: t.name };
-                if (n.indexOf(target) >= 0 || target.indexOf(n) >= 0) {
+                // Подстрочный матч только по границам слов: ' a b ' внутри ' a b c ',
+                // иначе "Avatar" ложно матчит "Avataria". Деструктивная операция —
+                // лучше не найти, чем удалить чужой файл.
+                var np = ' ' + n + ' ', tp = ' ' + target + ' ';
+                if (np.indexOf(tp) >= 0 || tp.indexOf(np) >= 0) {
                     var overlap = Math.min(n.length, target.length);
                     if (overlap >= 6 && (!best || overlap > best.overlap)) best = { id: t.id, name: t.name, overlap: overlap };
                 }
