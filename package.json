@@ -7,7 +7,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "node tools/verify-parser.js"
+    "test": "node tools/verify-parser.js && node tools/verify-torrent-match.js"
   },
   "repository": {
     "type": "git",

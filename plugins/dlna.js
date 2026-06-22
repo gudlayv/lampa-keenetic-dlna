@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.11.0';
+    var PLUGIN_VERSION = '0.12.0';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
@@ -1073,7 +1073,8 @@
         { id: 'cartoonmovies', title: 'Мультфильмы' },
         { id: 'cartoonseries', title: 'Мультсериалы' },
         { id: 'anime',         title: 'Аниме' },
-        { id: 'folders',       title: 'Папки' }
+        { id: 'folders',       title: 'Папки' },
+        { id: 'downloads',     title: 'Закачки' }
     ];
 
     // Универсальный плеер для DLNA-entry с TMDB-карточкой.
@@ -1155,7 +1156,8 @@
             cartoonmovies: [{ kind: 'cartoonmovies', title: 'Мультфильмы' }],
             cartoonseries: [{ kind: 'cartoonseries', title: 'Мультсериалы' }],
             anime:         [{ kind: 'anime',         title: 'Аниме' }],
-            folders:       [{ id: '0',               title: 'Keenetic Ultra' }]
+            folders:       [{ id: '0',               title: 'Keenetic Ultra' }],
+            downloads:     [{ kind: 'downloads', title: 'Закачки' }]
         };
         var html, head, filter, filterItems, body, scroll, self = this;
 
@@ -1205,6 +1207,7 @@
                 filterItems.forEach(function (i) { i.selected = i.tabId === item.tabId; });
                 currentTab = item.tabId;
                 updateFilterBadge();
+                stopDownloadsPoll();
                 reloadCurrent();
                 // Lampa.Select.hide() при выборе закрывает popup но не возвращает
                 // controller — фокус "висит" в скрытом select. Через setTimeout(0)
@@ -1249,6 +1252,7 @@
         // Перезагрузить текущую вкладку без перетоггливания controllers
         // (вызывается из filter.onSelect — Lampa.Select сам управляет фокусом)
         function reloadCurrent() {
+            stopDownloadsPoll();
             self.openCurrent({ skipControllerToggle: true });
         }
 
@@ -1262,6 +1266,11 @@
 
             if (top.kind === 'seasons') {
                 renderSeasonPicker(top, opts);
+                return;
+            }
+
+            if (top.kind === 'downloads') {
+                renderDownloads(opts);
                 return;
             }
 
@@ -1414,6 +1423,146 @@
                 self.activity.toggle();
                 Lampa.Controller.toggle('content');
             }
+        }
+
+        var DL_STATUS = { 0: 'на паузе', 1: 'проверка', 2: 'проверка', 3: 'в очереди', 4: 'качается', 5: 'в очереди', 6: 'раздается' };
+
+        function fmtSpeed(bps) {
+            if (!bps || bps < 1) return '';
+            var mb = bps / 1048576;
+            if (mb >= 1) return '↓ ' + mb.toFixed(1) + ' МБ/с';
+            return '↓ ' + Math.round(bps / 1024) + ' КБ/с';
+        }
+        function fmtEta(sec) {
+            if (sec == null || sec < 0) return '';
+            if (sec < 60) return 'ETA ' + sec + ' с';
+            if (sec < 3600) return 'ETA ' + Math.round(sec / 60) + ' мин';
+            return 'ETA ' + Math.round(sec / 3600) + ' ч';
+        }
+
+        function downloadRowHtml(t) {
+            var pct = Math.round((t.percentDone || 0) * 100);
+            var bits = [DL_STATUS[t.status] || ''];
+            var sp = fmtSpeed(t.rateDownload); if (sp) bits.push(sp);
+            var eta = fmtEta(t.eta); if (eta) bits.push(eta);
+            return '<div class="dlna-row__title"><b>' + escapeHtml(t.name || '') + '</b></div>' +
+                '<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;">' +
+                '<div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, pct) + '%;"></div></div>' +
+                '<div class="dlna-row__meta" style="margin-top:0.3em; opacity:0.7; font-size:0.85em;">' + pct + '% · ' + bits.filter(Boolean).join(' · ') + '</div>';
+        }
+
+        function renderDownloadRow(t) {
+            var row = $('<div class="selector dlna-row" data-tid="' + t.id + '" style="margin:0.3em 1em; padding:0.8em 1em; background:rgba(255,255,255,0.06); border-radius:0.5em;"></div>');
+            row.html(downloadRowHtml(t));
+            row.on('hover:focus', function () { scroll.update(row); });
+            row.on('hover:enter', function () { openDownloadMenu(t); });
+            return row;
+        }
+
+        function openDownloadMenu(t) {
+            Lampa.Select.show({
+                title: escapeHtml(t.name || 'Закачка'),
+                items: [
+                    { title: 'Отменить закачку (удалить файл)', _act: 'del' },
+                    { title: 'Отменить, файл оставить', _act: 'keep' },
+                    { title: 'Закрыть', _act: 'close' }
+                ],
+                onSelect: function (a) {
+                    if (a._act === 'close') { Lampa.Controller.toggle('content'); return; }
+                    confirmRemove(t, a._act === 'del');
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function confirmRemove(t, deleteLocal) {
+            Lampa.Select.show({
+                title: 'Точно отменить «' + escapeHtml(t.name || '') + '»?',
+                items: [{ title: 'Да, отменить', _yes: true }, { title: 'Назад', _yes: false }],
+                onSelect: function (a) {
+                    if (!a._yes) { Lampa.Controller.toggle('content'); return; }
+                    TransmissionClient.remove([t.id], deleteLocal, function () {
+                        Lampa.Noty.show('Закачка отменена');
+                        scroll.render().find('[data-tid="' + t.id + '"]').remove();
+                        Lampa.Controller.toggle('content');
+                    }, function (err) {
+                        Lampa.Noty.show('Не удалось отменить: ' + (err && err.reason || 'ошибка'));
+                        Lampa.Controller.toggle('content');
+                    });
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        // Патчим строки на месте по data-tid: полный ре-рендер каждые 4с угонял бы
+        // фокус пульта с текущей строки. Обновляем innerHTML существующей .dlna-row.
+        function paintDownloads(torrents) {
+            var existing = {};
+            scroll.render().find('.dlna-row[data-tid]').each(function () { existing[$(this).attr('data-tid')] = this; });
+            if (!torrents.length) {
+                scroll.clear();
+                scroll.append($('<div style="padding:1.5em; opacity:0.6;">Нет активных закачек</div>'));
+                return;
+            }
+            var seen = {};
+            torrents.forEach(function (t) {
+                seen[t.id] = true;
+                var el = existing[String(t.id)];
+                if (el) $(el).html(downloadRowHtml(t));
+                else scroll.append(renderDownloadRow(t));
+            });
+            var focusLost = false;
+            Object.keys(existing).forEach(function (id) {
+                if (seen[id]) return;
+                var el = existing[id];
+                if (el && el.className && el.className.indexOf('focus') >= 0) focusLost = true;
+                $(el).remove();
+            });
+            // Удаленная под фокусом строка оставляет контроллер с висячей ссылкой —
+            // пере-синхронизируем коллекцию, иначе навигация пультом застревает.
+            if (focusLost) Lampa.Controller.toggle('content');
+        }
+
+        function renderDownloads(opts) {
+            opts = opts || {};
+            stopDownloadsPoll();
+            if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
+                scroll.clear();
+                var msg = $('<div style="margin:1em; padding:1.2em; background:rgba(255,217,102,0.15); border-left:4px solid #ffd966; border-radius:0.4em; line-height:1.5;"></div>');
+                msg.html('<b>Transmission не настроен</b><br><br>Открой <b>Настройки → Keenetic DLNA</b> и заполни <b>Transmission RPC</b>.');
+                scroll.append(msg);
+                self.activity.loader(false);
+                if (!opts.skipControllerToggle) { self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                return;
+            }
+            var first = true;
+            var toggled = false;
+            var load = function () {
+                TransmissionClient.list(function (torrents) {
+                    if (first) { scroll.clear(); first = false; }
+                    paintDownloads(torrents);
+                    self.activity.loader(false);
+                    if (!toggled && !opts.skipControllerToggle) { toggled = true; self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                }, function (err) {
+                    if (first) {
+                        scroll.clear();
+                        var box = $('<div style="margin:1em; padding:1em; background:rgba(255,100,100,0.15); border-left:4px solid #ff6464; border-radius:0.4em;"></div>');
+                        box.append('<b>Ошибка Transmission:</b> ' + escapeHtml((err && err.reason) || 'unknown'));
+                        scroll.append(box);
+                        self.activity.loader(false);
+                        first = false;
+                        if (!opts.skipControllerToggle) { self.activity.toggle(); Lampa.Controller.toggle('content'); }
+                    }
+                    // Ошибку повторного тика глушим намеренно: не перетираем фокус
+                    // на списке; данные остаются последними успешными.
+                });
+            };
+            load();
+            self._dlTimer = setInterval(load, 4000);
+        }
+
+        function stopDownloadsPoll() {
+            if (self._dlTimer) { clearInterval(self._dlTimer); self._dlTimer = null; }
         }
 
         function renderEntries(rawEntries, opts) {
@@ -1733,6 +1882,19 @@
 
             card.on('hover:focus', function () { scroll.update(card); });
             card.on('hover:enter', function () { playEntry(entry, null); });
+            // Lampa шлет либо hover:long, либо hover:enter (по длительности нажатия),
+            // не оба — поэтому меню удаления не конфликтует с запуском плеера.
+            card.on('hover:long', function () {
+                Lampa.Select.show({
+                    title: escapeHtml(entry.title || 'Фильм'),
+                    items: [{ title: 'Удалить с диска', _act: 'del' }, { title: 'Закрыть', _act: 'close' }],
+                    onSelect: function (a) {
+                        if (a._act !== 'del') { Lampa.Controller.toggle('content'); return; }
+                        deleteMovieFile(entry, card);
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            });
             return card;
         }
 
@@ -1768,6 +1930,47 @@
                 var bar = $('<div class="dlna-row__progress" style="margin-top:0.4em; height:0.3em; background:rgba(255,255,255,0.1); border-radius:0.15em; overflow:hidden;"><div style="height:100%; background:linear-gradient(90deg,#3a73ff,#7ed957); width:' + Math.min(100, tl.percent) + '%;"></div></div>');
                 info.append(bar);
             }
+        }
+
+        /**
+         * Удаление файла с диска роутера. Прямого API удаления у MiniDLNA нет,
+         * поэтому идем через Transmission: torrent-remove + delete-local-data.
+         * Работает только для файлов, которые еще числятся раздачей; из выдачи
+         * DLNA запись пропадает не сразу, а после ресканирования MiniDLNA.
+         */
+        function deleteMovieFile(entry, card) {
+            if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
+                Lampa.Noty.show('Transmission не настроен — удаление недоступно');
+                Lampa.Controller.toggle('content');
+                return;
+            }
+            TransmissionClient.list(function (list) {
+                var hit = findTorrentForFile(entry.title, list);
+                if (!hit) {
+                    Lampa.Noty.show('Не нашел раздачу для файла в Transmission — удалить можно только через web-UI роутера');
+                    Lampa.Controller.toggle('content');
+                    return;
+                }
+                Lampa.Select.show({
+                    title: 'Удалить «' + escapeHtml(hit.name) + '» с диска?',
+                    items: [{ title: 'Да, удалить', _yes: true }, { title: 'Назад', _yes: false }],
+                    onSelect: function (a) {
+                        if (!a._yes) { Lampa.Controller.toggle('content'); return; }
+                        TransmissionClient.remove([hit.id], true, function () {
+                            Lampa.Noty.show('Удалено. Обновите список — MiniDLNA уберет фильм после ресканирования');
+                            if (card) card.remove();
+                            Lampa.Controller.toggle('content');
+                        }, function (err) {
+                            Lampa.Noty.show('Не удалось удалить: ' + (err && err.reason || 'ошибка'));
+                            Lampa.Controller.toggle('content');
+                        });
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            }, function (err) {
+                Lampa.Noty.show('Ошибка Transmission: ' + (err && err.reason || 'unknown'));
+                Lampa.Controller.toggle('content');
+            });
         }
 
         function playEntry(entry, episode) {
@@ -1916,9 +2119,10 @@
             });
         }
 
-        this.pause = function () {};
+        this.pause = function () { stopDownloadsPoll(); };
         this.stop = function () {};
         this.destroy = function () {
+            stopDownloadsPoll();
             self._destroyed = true;
             // Парный remove к follow в create() — иначе после N push/pop
             // в шине dlna_index копятся мертвые closures, каждое событие
@@ -2284,6 +2488,56 @@
     // запроса. Для совместимости со стандартным Transmission реализована fallback-
     // ветка на 409→retry с X-Transmission-Session-Id. Используем XHR, потому что
     // Lampa.Reguest не пробрасывает HTTP-статус и custom response-headers.
+
+    // Канонизация имени, чтобы очищенный DLNA-заголовок и имя раздачи Transmission
+    // сравнивались как равные несмотря на регистр и разделители (._-).
+    function normTorrentName(s) {
+        return String(s || '')
+            .toLowerCase()
+            .replace(/\.(mkv|mp4|avi|mov|m4v|webm|ts)$/i, '')
+            .replace(/[._\-\s]+/g, ' ')
+            .trim();
+    }
+
+    /**
+     * Ищет торрент в списке torrent-get, которому принадлежит DLNA-файл.
+     * Матч: нормализованное имя файла == нормализованному torrent.name или
+     * basename любого files[].name; либо одно содержит другое (overlap ≥ 6,
+     * чтобы короткие имена не давали ложных). Возврат { id, name } | null.
+     */
+    function findTorrentForFile(fileTitle, list) {
+        if (!fileTitle || !Array.isArray(list)) return null;
+        var target = normTorrentName(fileTitle);
+        if (target.length < 3) return null;
+        function basename(p) {
+            var s = String(p || '');
+            var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+            return i >= 0 ? s.slice(i + 1) : s;
+        }
+        var best = null;
+        for (var i = 0; i < list.length; i++) {
+            var t = list[i] || {};
+            var cands = [t.name];
+            if (Array.isArray(t.files)) {
+                for (var j = 0; j < t.files.length; j++) cands.push(basename(t.files[j] && t.files[j].name));
+            }
+            for (var c = 0; c < cands.length; c++) {
+                var n = normTorrentName(cands[c]);
+                if (n.length < 3) continue;
+                if (n === target) return { id: t.id, name: t.name };
+                // Подстрочный матч только по границам слов: ' a b ' внутри ' a b c ',
+                // иначе "Avatar" ложно матчит "Avataria". Деструктивная операция —
+                // лучше не найти, чем удалить чужой файл.
+                var np = ' ' + n + ' ', tp = ' ' + target + ' ';
+                if (np.indexOf(tp) >= 0 || tp.indexOf(np) >= 0) {
+                    var overlap = Math.min(n.length, target.length);
+                    if (overlap >= 6 && (!best || overlap > best.overlap)) best = { id: t.id, name: t.name, overlap: overlap };
+                }
+            }
+        }
+        return best ? { id: best.id, name: best.name } : null;
+    }
+
     var TransmissionClient = (function () {
         var sessionId = null;
 
@@ -2300,99 +2554,75 @@
             return 'Basic ' + btoa(c.user + ':' + c.pass);
         }
 
-        function buildBody(magnetOrUrl) {
-            var args = { filename: magnetOrUrl };
-            var dir = trDownloadDir();
-            if (dir) args['download-dir'] = dir;
-            return JSON.stringify({ method: 'torrent-add', arguments: args });
-        }
-
-        function send(magnetOrUrl, onDone, onFail) {
+        // Один RPC-вызов с обработкой 409 (CSRF session-id) и basic-auth.
+        // onDone(arguments), onFail({ reason, ... }) — reason-коды стабильны:
+        // auth | network | forbidden | server | rpc | parse | no_proxy.
+        function rpc(method, args, onDone, onFail, timeoutMs, _retried) {
             var url = rpcUrl();
             if (!url) { onFail({ reason: 'no_proxy' }); return; }
-            postOnce(url, magnetOrUrl, sessionId, function (status, sid, body) {
-                if (status === 409 && sid && sid !== sessionId) {
-                    sessionId = sid;
-                    postOnce(url, magnetOrUrl, sessionId, function (s2, _, b2) {
-                        handleFinal(s2, b2, onDone, onFail);
-                    });
-                    return;
-                }
-                handleFinal(status, body, onDone, onFail);
-            });
-        }
-
-        function postOnce(url, magnetOrUrl, sid, cb) {
             var xhr = new XMLHttpRequest();
             xhr.open('POST', url, true);
             xhr.setRequestHeader('Content-Type', 'application/json');
             var auth = basicAuthHeader();
             if (auth) xhr.setRequestHeader('Authorization', auth);
-            if (sid) xhr.setRequestHeader('X-Transmission-Session-Id', sid);
-            xhr.timeout = 15000;
+            if (sessionId) xhr.setRequestHeader('X-Transmission-Session-Id', sessionId);
+            xhr.timeout = timeoutMs || 15000;
             xhr.onreadystatechange = function () {
                 if (xhr.readyState !== 4) return;
-                var sidFromResp = xhr.getResponseHeader('X-Transmission-Session-Id');
-                cb(xhr.status, sidFromResp, xhr.responseText || '');
+                var sid = xhr.getResponseHeader('X-Transmission-Session-Id');
+                if (xhr.status === 409 && sid && !_retried) {
+                    sessionId = sid;
+                    rpc(method, args, onDone, onFail, timeoutMs, true);
+                    return;
+                }
+                if (xhr.status === 401) { onFail({ reason: 'auth' }); return; }
+                if (xhr.status === 403) { onFail({ reason: 'forbidden' }); return; }
+                if (xhr.status === 0)   { onFail({ reason: 'network' }); return; }
+                if (xhr.status >= 500)  { onFail({ reason: 'server', status: xhr.status }); return; }
+                var data;
+                try { data = JSON.parse(xhr.responseText || '{}'); }
+                catch (e) { onFail({ reason: 'parse', body: xhr.responseText }); return; }
+                if (!data || data.result !== 'success') { onFail({ reason: 'rpc', message: data && data.result }); return; }
+                onDone(data.arguments || {});
             };
-            xhr.ontimeout = function () { cb(0, null, ''); };
-            xhr.onerror = function () { cb(0, null, ''); };
-            xhr.send(buildBody(magnetOrUrl));
-        }
-
-        function handleFinal(status, bodyText, onDone, onFail) {
-            if (status === 401) { onFail({ reason: 'auth' }); return; }
-            if (status === 0)   { onFail({ reason: 'network' }); return; }
-            if (status === 403) { onFail({ reason: 'forbidden' }); return; }
-            if (status >= 500)  { onFail({ reason: 'server', status: status }); return; }
-            var data;
-            try { data = JSON.parse(bodyText); }
-            catch (e) { onFail({ reason: 'parse', body: bodyText }); return; }
-            if (!data || data.result !== 'success') {
-                onFail({ reason: 'rpc', message: data && data.result });
-                return;
-            }
-            var added = data.arguments && data.arguments['torrent-added'];
-            var dup   = data.arguments && data.arguments['torrent-duplicate'];
-            if (added) { onDone({ added: true, name: added.name || '' }); return; }
-            if (dup)   { onDone({ duplicate: true, name: dup.name || '' }); return; }
-            onFail({ reason: 'empty_args' });
+            xhr.ontimeout = function () { onFail({ reason: 'network' }); };
+            xhr.onerror   = function () { onFail({ reason: 'network' }); };
+            xhr.send(JSON.stringify({ method: method, arguments: args || {} }));
         }
 
         return {
             addTorrent: function (opts, onDone, onFail) {
+                onDone = onDone || function () {};
+                onFail = onFail || function () {};
                 if (!opts || !opts.magnet) { onFail({ reason: 'no_magnet' }); return; }
-                send(opts.magnet, onDone || function () {}, onFail || function () {});
+                var args = { filename: opts.magnet };
+                var dir = trDownloadDir();
+                if (dir) args['download-dir'] = dir;
+                rpc('torrent-add', args, function (a) {
+                    var added = a['torrent-added'], dup = a['torrent-duplicate'];
+                    if (added) onDone({ added: true, name: added.name || '' });
+                    else if (dup) onDone({ duplicate: true, name: dup.name || '' });
+                    else onFail({ reason: 'empty_args' });
+                }, onFail);
             },
-            // Для теста соединения из Settings: один POST session-stats
             ping: function (onDone, onFail) {
-                var url = rpcUrl();
-                if (!url) { onFail({ reason: 'no_proxy' }); return; }
-                var xhr = new XMLHttpRequest();
-                xhr.open('POST', url, true);
-                xhr.setRequestHeader('Content-Type', 'application/json');
-                var auth = basicAuthHeader();
-                if (auth) xhr.setRequestHeader('Authorization', auth);
-                if (sessionId) xhr.setRequestHeader('X-Transmission-Session-Id', sessionId);
-                xhr.timeout = 8000;
-                xhr.onreadystatechange = function () {
-                    if (xhr.readyState !== 4) return;
-                    var sid = xhr.getResponseHeader('X-Transmission-Session-Id');
-                    if (xhr.status === 409 && sid) {
-                        sessionId = sid;
-                        return TransmissionClient.ping(onDone, onFail);
-                    }
-                    if (xhr.status === 401) { onFail({ reason: 'auth' }); return; }
-                    if (xhr.status === 0)   { onFail({ reason: 'network' }); return; }
-                    try {
-                        var d = JSON.parse(xhr.responseText || '{}');
-                        if (d.result === 'success') onDone(d.arguments || {});
-                        else onFail({ reason: 'rpc', message: d.result });
-                    } catch (e) { onFail({ reason: 'parse' }); }
-                };
-                xhr.ontimeout = function () { onFail({ reason: 'network' }); };
-                xhr.onerror   = function () { onFail({ reason: 'network' }); };
-                xhr.send(JSON.stringify({ method: 'session-stats' }));
+                rpc('session-stats', {}, onDone || function () {}, onFail || function () {}, 8000);
+            },
+            list: function (onDone, onFail) {
+                onDone = onDone || function () {};
+                onFail = onFail || function () {};
+                var fields = ['id', 'name', 'percentDone', 'rateDownload', 'status', 'eta', 'totalSize', 'downloadDir', 'files'];
+                rpc('torrent-get', { fields: fields }, function (a) {
+                    onDone((a && a.torrents) || []);
+                }, onFail);
+            },
+            remove: function (ids, deleteLocal, onDone, onFail) {
+                onDone = onDone || function () {};
+                onFail = onFail || function () {};
+                if (!Array.isArray(ids)) ids = [ids];
+                rpc('torrent-remove', { ids: ids, 'delete-local-data': !!deleteLocal }, function () {
+                    onDone({ removed: true });
+                }, onFail);
             },
             _resetSession: function () { sessionId = null; }
         };
