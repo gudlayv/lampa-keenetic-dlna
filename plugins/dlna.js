@@ -67,6 +67,17 @@
     }
     function controlUrl() { return 'http://' + dlnaAddr() + '/ctl/ContentDir'; }
 
+    // Endpoint ffprobe нашего serve.py: origin прокси + /ffprobe.
+    // Origin-подход устойчив к кастомному пути прокси (serve.py отдает
+    // /ffprobe в корне, как /proxy/ и /ping). Сторонний прокc без этого
+    // endpoint просто вернет 404 — релейблинг тихо выключится.
+    function ffprobeEndpoint() {
+        var base = proxyBase();
+        if (!base) return '';
+        var m = base.match(/^https?:\/\/[^/]+/);
+        return m ? m[0] + '/ffprobe' : '';
+    }
+
     function escapeHtml(s) {
         return String(s).replace(/[<>&"]/g, function (c) {
             return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c];
@@ -2884,6 +2895,202 @@
         return { install: install, _wrap: wrap, _extract: extractTorrentInfo };
     })();
 
+    // Релейблинг аудиодорожек/субтитров в плеере. Нативный плеер (Tizen
+    // avplay) показывает "Неизвестно", т.к. читает из стрима только поле
+    // language (часто пустое), а имя студии дубляжа лежит в Title дорожки.
+    // Порт механизма cub.red/plugin/tracks: тянем раскладку из ffprobe
+    // нашего serve.py, маппим streams на дорожки плеера, перерисовываем меню
+    // через Lampa.PlayerPanel.setTracks()/setSubs(). Оригинал брал ffprobe из
+    // TorrServe (WebSocket) и гейтил по data.torrent_hash — у нас источник
+    // serve.py, гейт по принадлежности URL нашему DLNA-серверу.
+    var TrackRelabel = (function () {
+        var installed = false;
+
+        function isOurMedia(url) {
+            return !!url && String(url).indexOf(dlnaAddr()) !== -1;
+        }
+
+        function fetchProbe(url, cb) {
+            var ep = ffprobeEndpoint();
+            if (!ep) return; // нет прокси — нечего звать
+            $.ajax({
+                url: ep + '?url=' + encodeURIComponent(url),
+                type: 'GET',
+                dataType: 'json',
+                timeout: 20000,
+                success: function (json) { if (json && json.streams) cb(json); },
+                // 404 (сторонний прокси) / 503 (нет ffprobe) / timeout —
+                // no-op, плеер показывает дефолтное меню как раньше.
+                error: function () {}
+            });
+        }
+
+        function subscribe(data) {
+            var inited = false;
+            var inited_parse = false;
+            var webos_replace = {};
+
+            function getTracks() {
+                var video = Lampa.PlayerVideo.video();
+                return (video && video.audioTracks) || [];
+            }
+            function getSubs() {
+                var video = Lampa.PlayerVideo.video();
+                return (video && video.textTracks) || [];
+            }
+
+            function setTracks() {
+                if (!inited_parse) return;
+                var new_tracks = [];
+                var video_tracks = getTracks();
+                var parse_tracks = inited_parse.streams.filter(function (a) { return a.codec_type == 'audio'; });
+                var minus = 1;
+                if (parse_tracks.length !== video_tracks.length) parse_tracks = parse_tracks.filter(function (a) { return a.codec_name !== 'dts'; });
+                parse_tracks = parse_tracks.filter(function (a) { return a.tags; });
+                parse_tracks.forEach(function (track) {
+                    var orig = video_tracks[track.index - minus];
+                    var elem = {
+                        index: track.index - minus,
+                        language: track.tags.language,
+                        label: track.tags.title || track.tags.handler_name,
+                        ghost: orig ? false : true,
+                        selected: orig ? orig.selected == true || orig.enabled == true : false
+                    };
+                    Object.defineProperty(elem, 'enabled', {
+                        set: function (v) {
+                            if (v) {
+                                var aud = getTracks();
+                                var trk = aud[elem.index];
+                                for (var i = 0; i < aud.length; i++) { aud[i].enabled = false; aud[i].selected = false; }
+                                if (trk) { trk.enabled = true; trk.selected = true; }
+                            }
+                        },
+                        get: function () {}
+                    });
+                    new_tracks.push(elem);
+                });
+                if (parse_tracks.length) Lampa.PlayerPanel.setTracks(new_tracks);
+            }
+
+            function setSubs() {
+                if (!inited_parse) return;
+                var new_subs = [];
+                var video_subs = getSubs();
+                var parse_subs = inited_parse.streams.filter(function (a) { return a.codec_type == 'subtitle'; });
+                var minus = inited_parse.streams.filter(function (a) { return a.codec_type == 'audio'; }).length + 1;
+                parse_subs = parse_subs.filter(function (a) { return a.tags; });
+                parse_subs.forEach(function (track) {
+                    var orig = video_subs[track.index - minus];
+                    var elem = {
+                        index: track.index - minus,
+                        language: track.tags.language,
+                        label: track.tags.title || track.tags.handler_name,
+                        ghost: video_subs[track.index - minus] ? false : true,
+                        selected: orig ? orig.selected == true || orig.mode == 'showing' : false
+                    };
+                    Object.defineProperty(elem, 'mode', {
+                        set: function (v) {
+                            if (v) {
+                                var txt = getSubs();
+                                var sub = txt[elem.index];
+                                for (var i = 0; i < txt.length; i++) { txt[i].mode = 'disabled'; txt[i].selected = false; }
+                                if (sub) { sub.mode = 'showing'; sub.selected = true; }
+                            }
+                        },
+                        get: function () {}
+                    });
+                    new_subs.push(elem);
+                });
+                if (parse_subs.length) Lampa.PlayerPanel.setSubs(new_subs);
+            }
+
+            function setWebosTracks(video_tracks) {
+                if (!inited_parse) return;
+                var parse_tracks = inited_parse.streams.filter(function (a) { return a.codec_type == 'audio'; });
+                if (parse_tracks.length !== video_tracks.length) {
+                    parse_tracks = parse_tracks.filter(function (a) { return a.codec_name !== 'truehd'; });
+                    if (parse_tracks.length !== video_tracks.length) {
+                        parse_tracks = parse_tracks.filter(function (a) { return a.codec_name !== 'dts'; });
+                    }
+                }
+                parse_tracks = parse_tracks.filter(function (a) { return a.tags; });
+                parse_tracks.forEach(function (track, i) {
+                    if (video_tracks[i]) {
+                        video_tracks[i].language = track.tags.language;
+                        video_tracks[i].label = track.tags.title || track.tags.handler_name;
+                    }
+                });
+            }
+
+            function setWebosSubs(video_subs) {
+                if (!inited_parse) return;
+                var parse_subs = inited_parse.streams.filter(function (a) { return a.codec_type == 'subtitle'; });
+                if (parse_subs.length !== video_subs.length - 1) parse_subs = parse_subs.filter(function (a) { return a.codec_name !== 'hdmv_pgs_subtitle'; });
+                parse_subs = parse_subs.filter(function (a) { return a.tags; });
+                parse_subs.forEach(function (track, a) {
+                    var i = a + 1;
+                    if (video_subs[i]) {
+                        video_subs[i].language = track.tags.language;
+                        video_subs[i].label = track.tags.title || track.tags.handler_name;
+                    }
+                });
+            }
+
+            function listenTracks() { setTracks(); Lampa.PlayerVideo.listener.remove('tracks', listenTracks); }
+            function listenSubs() { setSubs(); Lampa.PlayerVideo.listener.remove('subs', listenSubs); }
+            function canPlay() {
+                if (webos_replace.tracks) setWebosTracks(webos_replace.tracks); else setTracks();
+                if (webos_replace.subs) setWebosSubs(webos_replace.subs); else setSubs();
+                Lampa.PlayerVideo.listener.remove('canplay', canPlay);
+            }
+            function listenWebosSubs(_data) { webos_replace.subs = _data.subs; if (inited_parse) setWebosSubs(_data.subs); }
+            function listenWebosTracks(_data) { webos_replace.tracks = _data.tracks; if (inited_parse) setWebosTracks(_data.tracks); }
+
+            function listenStart() {
+                inited = true;
+                fetchProbe(data.url, function (result) {
+                    inited_parse = result;
+                    if (inited) {
+                        if (webos_replace.subs) setWebosSubs(webos_replace.subs); else setSubs();
+                        if (webos_replace.tracks) setWebosTracks(webos_replace.tracks); else setTracks();
+                    }
+                });
+            }
+
+            function listenDestroy() {
+                inited = false;
+                Lampa.Player.listener.remove('destroy', listenDestroy);
+                Lampa.PlayerVideo.listener.remove('tracks', listenTracks);
+                Lampa.PlayerVideo.listener.remove('subs', listenSubs);
+                Lampa.PlayerVideo.listener.remove('webos_subs', listenWebosSubs);
+                Lampa.PlayerVideo.listener.remove('webos_tracks', listenWebosTracks);
+                Lampa.PlayerVideo.listener.remove('canplay', canPlay);
+            }
+
+            Lampa.Player.listener.follow('destroy', listenDestroy);
+            Lampa.PlayerVideo.listener.follow('tracks', listenTracks);
+            Lampa.PlayerVideo.listener.follow('subs', listenSubs);
+            Lampa.PlayerVideo.listener.follow('webos_subs', listenWebosSubs);
+            Lampa.PlayerVideo.listener.follow('webos_tracks', listenWebosTracks);
+            Lampa.PlayerVideo.listener.follow('canplay', canPlay);
+            listenStart();
+        }
+
+        function install() {
+            if (installed) return;
+            if (!window.Lampa || !Lampa.Player || !Lampa.Player.listener) return;
+            if (!Lampa.PlayerVideo || !Lampa.PlayerVideo.listener || !Lampa.PlayerPanel) return;
+            Lampa.Player.listener.follow('start', function (data) {
+                if (data && isOurMedia(data.url)) {
+                    try { subscribe(data); } catch (e) {}
+                }
+            });
+            installed = true;
+        }
+
+        return { install: install };
+    })();
+
     function startPlugin() {
         injectStyles();
 
@@ -3041,6 +3248,7 @@
             // чтобы не конкурировать со стартом LAMPA.
             try { IndexService.load(); } catch (e) {}
             try { CardButton.init(); } catch (e) {}
+            try { TrackRelabel.install(); } catch (e) {}
             try { TransmissionAddon.install(); } catch (e) {}
             try { bindTorrentListener(); } catch (e) {}
             setTimeout(function () {

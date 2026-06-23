@@ -46,6 +46,16 @@ opkg update
 echo "==> Установка python3, ca-certificates, curl"
 opkg install python3 ca-certificates curl
 
+# ffprobe нужен endpoint'у /ffprobe (релейблинг аудиодорожек в плеере:
+# вместо "Неизвестно" показываются имена дубляжей из Title дорожки).
+# Не критичен: без него endpoint отдает 503 и фича молча выключается.
+echo "==> Установка ffprobe (для названий аудиодорожек)"
+if opkg list | grep -q '^ffprobe '; then
+    opkg install ffprobe || echo "ffprobe не поставился — релейблинг дорожек будет выключен"
+else
+    opkg install ffmpeg || echo "ffmpeg не поставился — релейблинг дорожек будет выключен"
+fi
+
 if [ "$USE_TUNNEL" = 1 ]; then
     echo "==> Установка cloudflared (для публичного HTTPS-URL)"
     if opkg list | grep -q '^cloudflared '; then

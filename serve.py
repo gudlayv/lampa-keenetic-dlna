@@ -10,7 +10,11 @@ LAMPA-плагин шлёт SOAP-запросы через этот прокси
 - ALLOWED_HOSTS — whitelist хостов, на которые можно проксировать
   (дефолт: только адрес DLNA-сервера). Запросы на админку Кинетика
   и другие сервисы LAN отвергаются.
-- Никакой статики, никаких /reports — только /proxy + /ping.
+- Никакой статики, никаких /reports — только /proxy + /ping + /ffprobe.
+
+GET /ffprobe?url=<media-url> — раскладка дорожек медиафайла (ffprobe JSON)
+для релейблинга аудиодорожек в плеере LAMPA. url проверяется тем же
+allowlist. Требует ffprobe в PATH (opkg install ffprobe); нет — 503.
 
 Запуск:
     python3 serve.py [port] [--allow host:port,host:port]
@@ -20,12 +24,15 @@ LAMPA-плагин шлёт SOAP-запросы через этот прокси
     DLNA_PROXY_ALLOW="192.168.1.1:8200,192.168.1.1:80"
 """
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 def _parse_allow(s):
@@ -55,6 +62,11 @@ def host_allowed(target_url):
     port = u.port or (443 if u.scheme == "https" else 80)
     key = f"{u.hostname.lower()}:{port}"
     return key in ALLOWED_HOSTS
+
+
+# ffprobe-метаданные дорожек — кэш на время жизни процесса (файлы не меняются).
+_FFPROBE_CACHE = {}
+_FFPROBE_CACHE_MAX = 200
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -116,9 +128,78 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(resp_body)
 
+    def ffprobe(self):
+        # GET /ffprobe?url=<media-url> — раскладка дорожек медиафайла для
+        # релейблинга в плеере LAMPA (плагин показывает Title дорожек вместо
+        # "Неизвестно"). ffprobe для MKV читает только заголовок → быстро.
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        target = (qs.get("url") or [""])[0]
+        target = unquote(target)
+        if not target.startswith("http://") and not target.startswith("https://"):
+            self.send_error(400, "url must be absolute http(s) URL")
+            return
+        if not host_allowed(target):
+            print(f"[deny] ffprobe {target} (not in allowlist)")
+            self.send_error(403, "host not in allowlist")
+            return
+
+        if target in _FFPROBE_CACHE:
+            self._send_json(200, _FFPROBE_CACHE[target])
+            return
+
+        ffprobe_bin = shutil.which("ffprobe")
+        if not ffprobe_bin:
+            print("[ffprobe] binary not found (opkg install ffprobe)")
+            self.send_error(503, "ffprobe not installed")
+            return
+
+        try:
+            out = subprocess.run(
+                [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", target],
+                capture_output=True, timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"[ffprobe] timeout {target}")
+            self.send_error(502, "ffprobe timeout")
+            return
+        except Exception as e:
+            self.send_error(502, f"ffprobe error: {e}")
+            return
+
+        if out.returncode != 0 or not out.stdout:
+            print(f"[ffprobe] rc={out.returncode} {target}")
+            self.send_error(502, "ffprobe failed")
+            return
+
+        try:
+            data = json.loads(out.stdout)
+        except Exception:
+            self.send_error(502, "ffprobe returned non-json")
+            return
+
+        body = json.dumps({"streams": data.get("streams", [])}).encode("utf-8")
+        if len(_FFPROBE_CACHE) >= _FFPROBE_CACHE_MAX:
+            _FFPROBE_CACHE.clear()
+        _FFPROBE_CACHE[target] = body
+        n = len(data.get("streams", []))
+        print(f"[ffprobe] {target} -> {n} streams ({len(body)} bytes)")
+        self._send_json(200, body)
+
+    def _send_json(self, status, body):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path.startswith("/proxy/"):
             self.proxy_forward("GET")
+            return
+        if self.path.startswith("/ffprobe"):
+            self.ffprobe()
             return
         if self.path.startswith("/ping"):
             self.send_response(200)
