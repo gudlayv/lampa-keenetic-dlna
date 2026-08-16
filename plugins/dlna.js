@@ -2549,6 +2549,27 @@
         return best ? { id: best.id, name: best.name } : null;
     }
 
+    /**
+     * Сопоставление сохраненного выбора дорожки со списком дорожек меню.
+     * Каскад: точный label (имя студии) → language → index. Возвращает индекс
+     * элемента в массиве tracks или null. Пустые label/language не матчим —
+     * иначе два безымянных релиза дадут ложное совпадение.
+     */
+    function matchSavedTrack(saved, tracks) {
+        if (!saved || !Array.isArray(tracks) || !tracks.length) return null;
+        var i;
+        if (saved.label) {
+            for (i = 0; i < tracks.length; i++) if (tracks[i].label === saved.label) return i;
+        }
+        if (saved.language) {
+            for (i = 0; i < tracks.length; i++) if (tracks[i].language === saved.language) return i;
+        }
+        if (typeof saved.index === 'number') {
+            for (i = 0; i < tracks.length; i++) if (tracks[i].index === saved.index) return i;
+        }
+        return null;
+    }
+
     var TransmissionClient = (function () {
         var sessionId = null;
 
