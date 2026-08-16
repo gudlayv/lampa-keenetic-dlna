@@ -1702,6 +1702,21 @@
                     openSeason(showEntry.seasons[0]);
                 }
             });
+            /**
+             * Lampa шлет либо hover:long, либо hover:enter (по длительности нажатия),
+             * не оба — меню удаления не конфликтует с открытием сериала.
+             */
+            card.on('hover:long', function () {
+                Lampa.Select.show({
+                    title: escapeHtml(showEntry.show || 'Сериал'),
+                    items: [{ title: 'Удалить сериал с диска', _act: 'del' }, { title: 'Закрыть', _act: 'close' }],
+                    onSelect: function (a) {
+                        if (a._act !== 'del') { Lampa.Controller.toggle('content'); return; }
+                        deleteShowFiles(showEntry, card);
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            });
             return card;
         }
 
@@ -1969,6 +1984,60 @@
                         if (!a._yes) { Lampa.Controller.toggle('content'); return; }
                         TransmissionClient.remove([hit.id], true, function () {
                             Lampa.Noty.show('Удалено. Обновите список — MiniDLNA уберет фильм после ресканирования');
+                            if (card) card.remove();
+                            Lampa.Controller.toggle('content');
+                        }, function (err) {
+                            Lampa.Noty.show('Не удалось удалить: ' + (err && err.reason || 'ошибка'));
+                            Lampa.Controller.toggle('content');
+                        });
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            }, function (err) {
+                Lampa.Noty.show('Ошибка Transmission: ' + (err && err.reason || 'unknown'));
+                Lampa.Controller.toggle('content');
+            });
+        }
+
+        /**
+         * Удаление сериала целиком: все раздачи, чьи файлы матчатся на серии,
+         * уходят одним torrent-remove с delete-local-data. Серии, чьих раздач
+         * уже нет в Transmission, удалить нельзя — говорим об этом в
+         * подтверждении, но найденное удалить даем.
+         */
+        function deleteShowFiles(showEntry, card) {
+            if (!Lampa.Storage.field(STORAGE_TR_ADDR)) {
+                Lampa.Noty.show('Transmission не настроен — удаление недоступно');
+                Lampa.Controller.toggle('content');
+                return;
+            }
+            var displayName = (showEntry.tmdb && (showEntry.tmdb.name || showEntry.tmdb.original_name)) || showEntry.show;
+            TransmissionClient.list(function (list) {
+                var found = findTorrentsForShow(showEntry, list);
+                if (!found.torrents.length) {
+                    Lampa.Noty.show('Не нашел раздач сериала в Transmission — удалить можно только через web-UI роутера');
+                    Lampa.Controller.toggle('content');
+                    return;
+                }
+                var subtitle = found.torrents.map(function (t) { return '<span style="word-break:break-all">' + escapeHtml(t.name) + '</span>'; }).join(', ');
+                if (found.matchedEpisodes < found.totalEpisodes) {
+                    subtitle += ' — покрыто ' + found.matchedEpisodes + ' из ' + found.totalEpisodes + ' серий, остальное через web-UI роутера';
+                }
+                Lampa.Select.show({
+                    title: 'Удалить «' + escapeHtml(displayName) + '» с диска?',
+                    items: [
+                        {
+                            title: 'Да, удалить ' + found.torrents.length + ' ' + ruPlural(found.torrents.length, ['раздачу', 'раздачи', 'раздач']),
+                            subtitle: subtitle,
+                            _yes: true
+                        },
+                        { title: 'Назад', _yes: false }
+                    ],
+                    onSelect: function (a) {
+                        if (!a._yes) { Lampa.Controller.toggle('content'); return; }
+                        var ids = found.torrents.map(function (t) { return t.id; });
+                        TransmissionClient.remove(ids, true, function () {
+                            Lampa.Noty.show('Удалено раздач: ' + ids.length + '. Обновите список — MiniDLNA уберет сериал после ресканирования');
                             if (card) card.remove();
                             Lampa.Controller.toggle('content');
                         }, function (err) {
