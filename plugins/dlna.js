@@ -2927,6 +2927,56 @@
     var TrackRelabel = (function () {
         var installed = false;
 
+        var MEM_STORAGE_KEY = 'dlna_track_memory';
+        var MEM_LIMIT = 50;
+        /**
+         * Ключ текущего сериала живет на уровне модуля: при переключении серии
+         * плейлиста Player.start приходит без card (в элементах плейлиста только
+         * title/url/timeline), поэтому ключ вычисляется на первом старте
+         * через playMovie и переиспользуется последующими стартами.
+         */
+        var memSeriesKey = null;
+
+        function seriesKeyFromCard(card) {
+            if (!card) return null;
+            if (card.id) return 'tmdb_' + (card.method || 'movie') + '_' + card.id;
+            var t = card.title || card.name || card.original_title || card.original_name;
+            var n = normKey(t);
+            return n ? 'name_' + n : null;
+        }
+
+        function memLoad() {
+            try {
+                var m = Lampa.Storage.get(MEM_STORAGE_KEY, {});
+                if (typeof m === 'string') m = JSON.parse(m);
+                return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+            } catch (e) { return {}; }
+        }
+
+        function memGet(kind) {
+            if (!memSeriesKey) return null;
+            var rec = memLoad()[memSeriesKey];
+            return (rec && rec[kind]) || null;
+        }
+
+        function memSet(kind, choice) {
+            if (!memSeriesKey) return;
+            try {
+                var map = memLoad();
+                var rec = map[memSeriesKey] || {};
+                rec[kind] = choice;
+                rec.time = Date.now();
+                map[memSeriesKey] = rec;
+                var keys = Object.keys(map);
+                while (keys.length > MEM_LIMIT) {
+                    var oldest = keys.reduce(function (a, b) { return ((map[a] && map[a].time) || 0) <= ((map[b] && map[b].time) || 0) ? a : b; });
+                    delete map[oldest];
+                    keys = Object.keys(map);
+                }
+                Lampa.Storage.set(MEM_STORAGE_KEY, map);
+            } catch (e) {}
+        }
+
         function isOurMedia(url) {
             return !!url && String(url).indexOf(dlnaAddr()) !== -1;
         }
@@ -2947,6 +2997,9 @@
         }
 
         function subscribe(data) {
+            var startKey = seriesKeyFromCard(data.card);
+            if (startKey) memSeriesKey = startKey;
+
             var inited = false;
             var inited_parse = false;
             var webos_replace = {};
