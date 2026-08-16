@@ -3037,13 +3037,28 @@
                                 var trk = aud[elem.index];
                                 for (var i = 0; i < aud.length; i++) { aud[i].enabled = false; aud[i].selected = false; }
                                 if (trk) { trk.enabled = true; trk.selected = true; }
+                                memSet('audio', { label: elem.label, language: elem.language, index: elem.index });
                             }
                         },
                         get: function () {}
                     });
                     new_tracks.push(elem);
                 });
+                applySavedAudio(new_tracks);
                 if (parse_tracks.length) Lampa.PlayerPanel.setTracks(new_tracks);
+            }
+
+            function applySavedAudio(new_tracks) {
+                var saved = memGet('audio');
+                if (!saved) return;
+                var at = matchSavedTrack(saved, new_tracks);
+                if (at === null) return;
+                var aud = getTracks();
+                var trk = aud[new_tracks[at].index];
+                if (!trk) return;
+                for (var i = 0; i < aud.length; i++) { aud[i].enabled = false; aud[i].selected = false; }
+                trk.enabled = true; trk.selected = true;
+                new_tracks.forEach(function (t, j) { t.selected = j === at; });
             }
 
             function setSubs() {
@@ -3064,18 +3079,57 @@
                     };
                     Object.defineProperty(elem, 'mode', {
                         set: function (v) {
+                            if (v === 'disabled' || v === 'hidden') {
+                                /**
+                                 * Панель зовет этот сеттер отдельно для каждого прокси-элемента —
+                                 * сам сеттер гасит свой реальный трек. Когда после гашения ни один
+                                 * реальный трек не showing — это явное «Отключить», запоминаем.
+                                 * Выбор конкретного саба панель делает следом отдельным вызовом —
+                                 * memSet перезапишет off корректным выбором.
+                                 */
+                                var all = getSubs();
+                                var mine = all[elem.index];
+                                if (mine) { mine.mode = 'disabled'; mine.selected = false; }
+                                var any = false;
+                                for (var i = 0; i < all.length; i++) if (all[i].mode === 'showing') any = true;
+                                if (!any) memSet('subs', { off: true });
+                                return;
+                            }
                             if (v) {
                                 var txt = getSubs();
                                 var sub = txt[elem.index];
                                 for (var i = 0; i < txt.length; i++) { txt[i].mode = 'disabled'; txt[i].selected = false; }
                                 if (sub) { sub.mode = 'showing'; sub.selected = true; }
+                                memSet('subs', { label: elem.label, language: elem.language, index: elem.index });
                             }
                         },
                         get: function () {}
                     });
                     new_subs.push(elem);
                 });
+                applySavedSubs(new_subs);
                 if (parse_subs.length) Lampa.PlayerPanel.setSubs(new_subs);
+            }
+
+            function applySavedSubs(new_subs) {
+                var saved = memGet('subs');
+                if (!saved) return;
+                var txt = getSubs();
+                var i;
+                if (saved.off) {
+                    for (i = 0; i < txt.length; i++) { txt[i].mode = 'disabled'; txt[i].selected = false; }
+                    new_subs.forEach(function (s) { s.selected = false; });
+                    if (Lampa.PlayerVideo && typeof Lampa.PlayerVideo.subsview === 'function') Lampa.PlayerVideo.subsview(false);
+                    return;
+                }
+                var at = matchSavedTrack(saved, new_subs);
+                if (at === null) return;
+                var sub = txt[new_subs[at].index];
+                if (!sub) return;
+                for (i = 0; i < txt.length; i++) { txt[i].mode = 'disabled'; txt[i].selected = false; }
+                sub.mode = 'showing'; sub.selected = true;
+                new_subs.forEach(function (s, j) { s.selected = j === at; });
+                if (Lampa.PlayerVideo && typeof Lampa.PlayerVideo.subsview === 'function') Lampa.PlayerVideo.subsview(true);
             }
 
             function setWebosTracks(video_tracks) {
