@@ -15,7 +15,7 @@
         };
     }
 
-    var PLUGIN_VERSION = '0.13.0';
+    var PLUGIN_VERSION = '0.14.0';
 
     // Конфиг через Lampa.SettingsApi (Settings → Keenetic DLNA).
     // dlna_address — IP:port DLNA-сервера Кинетика (default 192.168.1.1:8200, MiniDLNA)
