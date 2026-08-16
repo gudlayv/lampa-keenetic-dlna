@@ -7,7 +7,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "node tools/verify-parser.js && node tools/verify-torrent-match.js && node tools/verify-track-memory.js"
+    "test": "node tools/verify-parser.js && node tools/verify-torrent-match.js && node tools/verify-track-memory.js && node tools/verify-show-delete.js"
   },
   "repository": {
     "type": "git",

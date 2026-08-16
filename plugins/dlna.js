@@ -2570,6 +2570,29 @@
         return null;
     }
 
+    /**
+     * Все раздачи Transmission, покрывающие серии сериала. Сезон-пак матчится
+     * многими сериями в одну раздачу — id дедуплицируются. Матчинг наследует
+     * консервативность findTorrentForFile: лучше не найти, чем удалить чужое.
+     */
+    function findTorrentsForShow(showEntry, list) {
+        var seen = {};
+        var res = { torrents: [], matchedEpisodes: 0, totalEpisodes: 0 };
+        var seasons = (showEntry && showEntry.seasons) || [];
+        for (var s = 0; s < seasons.length; s++) {
+            var eps = seasons[s].episodes || [];
+            for (var e = 0; e < eps.length; e++) {
+                res.totalEpisodes++;
+                var hit = findTorrentForFile(eps[e].title, list);
+                if (hit) {
+                    res.matchedEpisodes++;
+                    if (!seen[hit.id]) { seen[hit.id] = true; res.torrents.push(hit); }
+                }
+            }
+        }
+        return res;
+    }
+
     var TransmissionClient = (function () {
         var sessionId = null;
 
